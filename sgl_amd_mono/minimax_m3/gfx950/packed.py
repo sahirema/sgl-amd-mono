@@ -107,6 +107,15 @@ class Packed:
         The cost of that is where the refusals land: a cache the kernels cannot
         read is reported on the first routed step, not at startup with the
         other ranks' reasons.
+
+        This allocates, so it must not run inside a CUDA graph capture, or the
+        tables would be cut from that graph's private memory pool while every
+        later graph holds their addresses. It does not: the full-graph backend
+        runs two eager warmup forwards before each capture, exactly so one-time
+        setup is paid outside the capture region (the ``range(2)`` warmup loop
+        ahead of ``torch.cuda.CUDAGraph()`` in
+        ``model_executor/runner_backend/full_cuda_graph_backend.py``), and the
+        first routed width's first warmup is where this lands.
         """
         if self._bound:
             return
