@@ -7,7 +7,7 @@ scratch and peer-symmetric regions, and the LDS row pitches. Kept free of FlyDSL
 so it is testable without a GPU.
 """
 
-from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
+from sgl_amd_mono.minimax_m3.gfx950.config import (
     BLOCKS,
     HEAD_DIM,
     HIDDEN,

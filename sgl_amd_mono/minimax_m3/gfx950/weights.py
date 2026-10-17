@@ -4,8 +4,9 @@
 
 The kernels read tensors through raw pointers: a differently-laid-out weight
 would not fault, it would produce plausible garbage. So every assumption is
-asserted here once and a model that does not match is refused
-(``MonoRefused``) rather than misread.
+asserted here once and a model that does not match is refused rather than
+misread. The spec collects these refusals into its ``model_disable_reasons``,
+which is how SGLang reports every rank's reasons together.
 
 Two kinds of tensor are private copies rather than views of the original path:
 
@@ -25,7 +26,7 @@ from __future__ import annotations
 import msgspec
 import torch
 
-from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
+from sgl_amd_mono.minimax_m3.gfx950.config import (
     HEAD_DIM,
     HIDDEN,
     INTER,
@@ -39,7 +40,6 @@ from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
     TOPK_BLOCKS,
     IndexHeads,
 )
-from sglang.srt.layers.mono.guards import MonoRefused
 
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -47,7 +47,7 @@ FP8_MAX = 448.0
 
 def _need(ok: bool, what: str) -> None:
     if not ok:
-        raise MonoRefused(what)
+        raise ValueError(what)
 
 
 def _attr(obj, name: str, what: str):

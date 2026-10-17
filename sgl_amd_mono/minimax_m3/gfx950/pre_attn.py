@@ -27,7 +27,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T
 
-from sglang.kernels.ops.mono.gfx950.common.device.ops import (
+from sgl_amd_mono.common.ops import (
     CM_DEV,
     bf16_pair,
     bf16_round,
@@ -41,8 +41,8 @@ from sglang.kernels.ops.mono.gfx950.common.device.ops import (
     uniform,
     wave_max,
 )
-from sglang.kernels.ops.mono.gfx950.common.device.sync import Mailbox
-from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
+from sgl_amd_mono.common.sync import Mailbox
+from sgl_amd_mono.minimax_m3.gfx950.config import (
     BLOCKS,
     HEAD_DIM,
     HIDDEN,
@@ -61,16 +61,16 @@ from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
     IndexHeads,
     qkv_rows,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.device import (
+from sgl_amd_mono.minimax_m3.gfx950.device import (
     ar_pack_sumsq,
     release_stores,
     step_tag,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.index_score import (
+from sgl_amd_mono.minimax_m3.gfx950.index_score import (
     emit_index_scores,
     step_rows,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.reduction import ar_block_sums
+from sgl_amd_mono.minimax_m3.gfx950.reduction import ar_block_sums
 
 FP8_MAX = 448.0
 ROWS_PER_TASK = 16

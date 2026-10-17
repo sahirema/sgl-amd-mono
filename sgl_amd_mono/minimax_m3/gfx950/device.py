@@ -8,8 +8,8 @@ from flydsl.expr import math as fmath
 from flydsl.expr import rocdl
 from flydsl.expr.typing import T
 
-from sglang.kernels.ops.mono.gfx950.common.device.ops import rsrc, uniform
-from sglang.kernels.ops.mono.gfx950.minimax_m3.config import LAYER_SLOTS
+from sgl_amd_mono.common.ops import rsrc, uniform
+from sgl_amd_mono.minimax_m3.gfx950.config import LAYER_SLOTS
 
 
 def step_tag(step_ptr, layer):

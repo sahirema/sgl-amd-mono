@@ -5,7 +5,7 @@
 import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr
 
-from sglang.kernels.ops.mono.gfx950.common.device.ops import butterfly, traced
+from sgl_amd_mono.common.ops import butterfly, traced
 
 
 @traced

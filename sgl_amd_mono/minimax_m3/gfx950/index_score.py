@@ -26,7 +26,7 @@ from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
-from sglang.kernels.ops.mono.gfx950.common.device.ops import (
+from sgl_amd_mono.common.ops import (
     butterfly,
     fp8x8_bf16_pk,
     lane_gather,
@@ -38,7 +38,7 @@ from sglang.kernels.ops.mono.gfx950.common.device.ops import (
     uniform,
     unlikely,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
+from sgl_amd_mono.minimax_m3.gfx950.config import (
     BLOCKS,
     HEAD_DIM,
     INDEX_CP_FROM_BLOCKS,
@@ -51,7 +51,7 @@ from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
     WAVES,
     IndexHeads,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.layout import ISCORE_BLOCKS
+from sgl_amd_mono.minimax_m3.gfx950.layout import ISCORE_BLOCKS
 
 INDEX_BLOCK_BYTES = SPARSE_BLOCK * HEAD_DIM  # one fp8 index-K block
 KEY_TILES = SPARSE_BLOCK // 16  # MFMA row tiles of a block

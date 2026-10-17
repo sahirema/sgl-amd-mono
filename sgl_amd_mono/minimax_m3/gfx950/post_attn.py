@@ -56,15 +56,15 @@ from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
 
-from sglang.kernels.ops.mono.gfx950.common.device.mx import scale_index
-from sglang.kernels.ops.mono.gfx950.common.device.ops import (
+from sgl_amd_mono.common.mx import scale_index
+from sgl_amd_mono.common.ops import (
     CM_DEV,
     bf2_f32,
     bf16_pair,
     bf16_round,
 )
-from sglang.kernels.ops.mono.gfx950.common.device.ops import block_max as block_max_of
-from sglang.kernels.ops.mono.gfx950.common.device.ops import (
+from sgl_amd_mono.common.ops import block_max as block_max_of
+from sgl_amd_mono.common.ops import (
     butterfly,
     fp8_pack4,
     hw_exp2,
@@ -78,15 +78,15 @@ from sglang.kernels.ops.mono.gfx950.common.device.ops import (
     wave_sum,
     xshfl,
 )
-from sglang.kernels.ops.mono.gfx950.common.device.select import (
+from sgl_amd_mono.minimax_m3.gfx950.select import (
     KEY_LEAST,
     compact,
     count_beaten,
     group_floor,
     put_key,
 )
-from sglang.kernels.ops.mono.gfx950.common.device.sync import Mailbox, preg
-from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
+from sgl_amd_mono.common.sync import Mailbox, preg
+from sgl_amd_mono.minimax_m3.gfx950.config import (
     BLOCKS,
     HEAD_DIM,
     HIDDEN,
@@ -110,12 +110,12 @@ from sglang.kernels.ops.mono.gfx950.minimax_m3.config import (
     WAVES,
     IndexHeads,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.device import release_stores, step_tag
-from sglang.kernels.ops.mono.gfx950.minimax_m3.index_score import (
+from sgl_amd_mono.minimax_m3.gfx950.device import release_stores, step_tag
+from sgl_amd_mono.minimax_m3.gfx950.index_score import (
     index_scale_log2e,
     step_rows,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.layout import (
+from sgl_amd_mono.minimax_m3.gfx950.layout import (
     AG_RS_FROM,
     CAND_CAP,
     DN_ROWS,
@@ -165,19 +165,19 @@ from sglang.kernels.ops.mono.gfx950.minimax_m3.layout import (
     ug_tasks_of,
     wide_moe,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.pre_attn import (
+from sgl_amd_mono.minimax_m3.gfx950.pre_attn import (
     K1_ARGS,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.pre_attn import (
+from sgl_amd_mono.minimax_m3.gfx950.pre_attn import (
     N_HEAD_TASKS as K1_HEAD_TASKS,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.pre_attn import (
+from sgl_amd_mono.minimax_m3.gfx950.pre_attn import (
     SCRATCH_HDONE as K1_SCRATCH_HDONE,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.pre_attn import (
+from sgl_amd_mono.minimax_m3.gfx950.pre_attn import (
     SCRATCH_RDONE as K1_SCRATCH_RDONE,
 )
-from sglang.kernels.ops.mono.gfx950.minimax_m3.pre_attn import (
+from sgl_amd_mono.minimax_m3.gfx950.pre_attn import (
     emit_k1,
 )
 
