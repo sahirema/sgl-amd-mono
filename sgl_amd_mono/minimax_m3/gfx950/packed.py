@@ -74,11 +74,22 @@ class Packed:
         self._pack_layers(layers, config)
         self._bind_caches()
         self._alloc_buffers()
+        # The private copies, reported rather than left implicit: unlike the
+        # other model's relayout-only copies, the qkv / index and o_proj ones
+        # are also QUANTIZED (bf16 -> per-channel FP8), which the standard path
+        # does not do. RFC #43949 asks that kernels never quantize more than
+        # the normal path; this one does, inherited from sglang#44319.
+        copied = sum(
+            t.numel() * t.element_size()
+            for lw in self.sparse
+            for t in (lw.w_qkv, lw.s_qkv, lw.w_o, lw.s_o, lw.gate)
+        )
         logger.info(
             "[mono][rank %d] minimax_m3 packed: %d sparse layers (%d..%d), %d "
-            "block-table columns, %d KV slots",
+            "block-table columns, %d KV slots, %.2f GiB of private weight copies "
+            "(qkv / index and o_proj quantized bf16 -> FP8, router gate bf16)",
             self.rank, len(self.sparse), self.first_layer, self.sparse_ids[-1],
-            self.bt_width, self.num_slots,
+            self.bt_width, self.num_slots, copied / 2**30,
         )  # fmt: skip
 
     # ------------------------------------------------------------- weights
