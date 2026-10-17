@@ -92,7 +92,10 @@ class Packed:
         heads = self.dims.index_heads
         cos_sin_tables: dict = {}
         self.sparse = [
-            SparseMoeLayer.from_layer(layers[i], i, self.dims, heads, cos_sin_tables)
+            # dims is not passed: IndexHeads already carries the Dims it was
+            # validated against, so taking it from heads.dims keeps one source
+            # of truth rather than two that can disagree
+            SparseMoeLayer.from_layer(layers[i], i, heads, cos_sin_tables)
             for i in self.sparse_ids
         ]
         _, init_blocks, local_blocks = sparse_selection(config)

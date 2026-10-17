@@ -29,12 +29,7 @@ import torch
 from sgl_amd_mono.minimax_m3.gfx950.config import (
     HEAD_DIM,
     HIDDEN,
-    INTER,
-    LOCAL_KV_HEADS,
-    LOCAL_Q_HEADS,
     N_ROUTED,
-    O_K,
-    PADDED_SCALE_COLS,
     ROTARY_DIM,
     TOP_K,
     TOPK_BLOCKS,
@@ -161,6 +156,10 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
         # parallelism still divides and strides by TP where it means "index
         # heads", so it is TP4-only and stays refused.
         _need(not heads.cp, "indexer context parallelism is not ported")
+        # A rank's shapes travel with its index heads: ``IndexHeads`` holds the
+        # ``Dims`` it was built against, so the checks below cannot be read
+        # against a different TP than the kernels were.
+        dims = heads.dims
         attn = layer.self_attn
         _need(
             layer.is_layer_sparse and attn.is_sparse_attention_layer,
@@ -173,7 +172,8 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
         _need(
             (attn.num_heads, attn.num_kv_heads, attn.num_idx_heads, attn.head_dim,
              attn.idx_head_dim)
-            == (LOCAL_Q_HEADS, LOCAL_KV_HEADS, heads.count, HEAD_DIM, HEAD_DIM),
+            == (dims.local_q_heads, dims.local_kv_heads, heads.count, HEAD_DIM,
+                HEAD_DIM),
             f"layer {layer_id}: heads {attn.num_heads}/{attn.num_kv_heads}/"
             f"{attn.num_idx_heads}, dims {attn.head_dim}/{attn.idx_head_dim}",
         )  # fmt: skip
@@ -203,7 +203,7 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
             weight, heads.rows, HIDDEN, f"layer {layer_id} qkv"
         )
         w_o, s_o = linear_to_ptpc_fp8(
-            attn.o_proj.weight.data, HIDDEN, O_K, f"layer {layer_id} o_proj"
+            attn.o_proj.weight.data, HIDDEN, dims.o_k, f"layer {layer_id} o_proj"
         )
 
         moe = layer.mlp
@@ -224,9 +224,9 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
             f"layer {layer_id}: {routed_top_k} routed experts a token, built for {TOP_K}",
         )
         _need(
-            experts.intermediate_size_per_partition == INTER,
+            experts.intermediate_size_per_partition == dims.inter,
             f"layer {layer_id}: expert intermediate {experts.intermediate_size_per_partition}"
-            f" a rank, built for {INTER}",
+            f" a rank, built for {dims.inter}",
         )
         E = N_ROUTED + 1
         w13 = experts.w13_weight
@@ -238,26 +238,27 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
         _need(
             w13.dtype == torch.uint8
             and w2.dtype == torch.uint8
-            and w13.numel() == E * 2 * INTER * HIDDEN // 2
-            and w2.numel() == E * HIDDEN * INTER // 2,
+            and w13.numel() == E * 2 * dims.inter * HIDDEN // 2
+            and w2.numel() == E * HIDDEN * dims.inter // 2,
             f"layer {layer_id}: expert weight {w13.dtype} {tuple(w13.shape)} / "
             f"{w2.dtype} {tuple(w2.shape)}",
         )
         s13 = _attr(experts, "w13_weight_scale", f"layer {layer_id} experts")
         s2 = _attr(experts, "w2_weight_scale", f"layer {layer_id} experts")
-        # w2's scale is [E, HIDDEN, INTER // 32] before aiter's e8m0_shuffle,
+        # w2's scale is [E, HIDDEN, inter // 32] before aiter's e8m0_shuffle,
         # which pads the column count up to a multiple of 8 -- so the stored
-        # tensor is PADDED_SCALE_COLS wide, not INTER // 32. The two agree at
-        # TP4 (24) and TP2 (48) and differ at TP8, where 12 columns are stored
-        # as 16. w13's scale is HIDDEN // 32 = 192 wide and never pads.
+        # tensor is ``dims.padded_scale_cols`` wide, not ``dims.scale_cols``.
+        # The two agree at TP4 (24) and TP2 (48) and differ at TP8, where 12
+        # columns are stored as 16. w13's scale is HIDDEN // 32 = 192 wide and
+        # never pads.
         _need(
             s13.dtype == torch.uint8
             and s2.dtype == torch.uint8
-            and s13.numel() == E * 2 * INTER * HIDDEN // 32
-            and s2.numel() == E * HIDDEN * PADDED_SCALE_COLS,
+            and s13.numel() == E * 2 * dims.inter * HIDDEN // 32
+            and s2.numel() == E * HIDDEN * dims.padded_scale_cols,
             f"layer {layer_id}: expert scales {s13.dtype} {s13.numel()} / "
-            f"{s2.dtype} {s2.numel()}, want {E * 2 * INTER * HIDDEN // 32} / "
-            f"{E * HIDDEN * PADDED_SCALE_COLS}",
+            f"{s2.dtype} {s2.numel()}, want {E * 2 * dims.inter * HIDDEN // 32} / "
+            f"{E * HIDDEN * dims.padded_scale_cols}",
         )
 
         gate = moe.gate.weight
