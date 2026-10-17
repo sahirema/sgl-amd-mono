@@ -72,8 +72,8 @@ class Packed:
         self.first_layer = self.sparse_ids[0]
         config = getattr(hf_config, "text_config", None) or hf_config
         self._pack_layers(layers, config)
-        self._bind_caches()
         self._alloc_buffers()
+        self._bound = False
         # The private copies, reported rather than left implicit: unlike the
         # other model's relayout-only copies, the qkv / index and o_proj ones
         # are also QUANTIZED (bf16 -> per-channel FP8), which the standard path
@@ -85,11 +85,38 @@ class Packed:
             for t in (lw.w_qkv, lw.s_qkv, lw.w_o, lw.s_o, lw.gate)
         )
         logger.info(
-            "[mono][rank %d] minimax_m3 packed: %d sparse layers (%d..%d), %d "
-            "block-table columns, %d KV slots, %.2f GiB of private weight copies "
-            "(qkv / index and o_proj quantized bf16 -> FP8, router gate bf16)",
+            "[mono][rank %d] minimax_m3 packed: %d sparse layers (%d..%d), "
+            "%.2f GiB of private weight copies (qkv / index and o_proj "
+            "quantized bf16 -> FP8, router gate bf16)",
             self.rank, len(self.sparse), self.first_layer, self.sparse_ids[-1],
-            self.bt_width, self.num_slots, copied / 2**30,
+            copied / 2**30,
+        )  # fmt: skip
+
+    def bind(self) -> None:
+        """Bind the KV caches and the request table, once, on the first routed
+        step rather than at build.
+
+        The caches do not exist at build: the framework builds the spec from
+        ``install_monokernel_forward``, outside any forward, and SGLang's
+        ``get_attn_backend`` reads a context ``ModelRunner`` publishes per
+        forward call -- reading it at build asserts. The KV pools are sized
+        after the model loads anyway, so there is nothing to bind to yet. The
+        other model on this runtime binds its caches at its layer's first
+        launch for the same reason.
+
+        The cost of that is where the refusals land: a cache the kernels cannot
+        read is reported on the first routed step, not at startup with the
+        other ranks' reasons.
+        """
+        if self._bound:
+            return
+        self._bind_caches()
+        self._alloc_tables()
+        self._bound = True
+        logger.info(
+            "[mono][rank %d] minimax_m3 caches bound: %d block-table columns, "
+            "%d KV slots",
+            self.rank, self.bt_width, self.num_slots,
         )  # fmt: skip
 
     # ------------------------------------------------------------- weights
@@ -233,11 +260,15 @@ class Packed:
 
     # ------------------------------------------------------------- buffers
     def _alloc_buffers(self) -> None:
-        """Scratch, the peer buffer, the step counter, the ``(ar, h_mid)`` pairs,
-        each layer's fixed K1 arguments and the per-width row tables."""
+        """Scratch, the peer buffer, the guard block, the step counter and the
+        ``(ar, h_mid)`` pairs: everything whose size the rank's shapes fix.
+
+        Built at build, not at bind, because the peer buffer is a collective --
+        every rank exchanges its base address here, and build is the point
+        where the ranks are in lockstep by construction."""
         from sgl_amd_mono.common.peer import PeerBuffer
         from sgl_amd_mono.minimax_m3.gfx950.layout import Layout, sym_layout
-        from sgl_amd_mono.minimax_m3.gfx950.pre_attn import K1_ARGS, K1Layout
+        from sgl_amd_mono.minimax_m3.gfx950.pre_attn import K1Layout
 
         dims, dev = self.dims, self.device
         self.layout = Layout(dims=dims)
@@ -280,6 +311,14 @@ class Packed:
             MAX_TOKENS, dims.local_q_heads * HEAD_DIM, dtype=bf16, device=dev
         )
         self.iq = torch.empty(MAX_TOKENS, 1, HEAD_DIM, dtype=bf16, device=dev)
+
+    # -------------------------------------------------------------- tables
+    def _alloc_tables(self) -> None:
+        """What the caches and the request table size: the per-layer K1 argument
+        tables and the per-width row tables. Built by ``bind``, not at build."""
+        from sgl_amd_mono.minimax_m3.gfx950.pre_attn import K1_ARGS
+
+        dev = self.device
         # each layer's K1 pointers that do not change per step (K1_ARGS order)
         self.k1_args = []
         for i, lw in enumerate(self.sparse):

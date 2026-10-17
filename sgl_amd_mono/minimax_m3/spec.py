@@ -275,6 +275,12 @@ class _Built:
             start,
         )
 
+        # The KV caches and the request table are reachable only from inside a
+        # forward (SGLang publishes the attention backend per call), and they
+        # are sized after the model loads, so they are bound on the first
+        # routed step rather than at build. Idempotent, and before any launch.
+        self.packed.bind()
+
         model = self.model
         hidden = (
             model.get_input_embeddings()(input_ids)
