@@ -370,6 +370,13 @@ SPEC = MonoSpec(
     # refuses that server instead, and the capture code costs nothing until
     # someone measures it.
     requires=Requirements(
+        # The attention weights the kernels quantize to private FP8 copies are
+        # read as bf16 (``weights.py:68-71``), which refuses anything else --
+        # but from inside ``build``, as a bare ValueError after the model has
+        # loaded. Declaring it here moves that refusal to startup validation,
+        # where the framework collects every rank's reasons and reports them
+        # together.
+        dtypes=frozenset({"bfloat16"}),
         attention_backends=frozenset({"aiter"}),
         server_args={
             # the kernels index 128-token pages and write fp8_e4m3 K / V

@@ -111,24 +111,30 @@ def test_unsupported_tp_is_refused():
 def test_tp_is_the_only_field_so_the_kernel_cache_cannot_go_stale():
     """``tp`` must stay the ONLY field of :class:`Dims`. This is not tidiness.
 
-    FlyDSL caches a compiled kernel on disk under a key made of the toolchain
-    version, the source text of the jit function and its dependencies, and the
-    *scalar* values it closes over -- where scalar means
+    FlyDSL identifies a compiled kernel partly by the *scalar* values the jit
+    function closes over -- where scalar means
     ``(int, float, bool, str, NoneType, tuple, Enum)``
     (``flydsl/compiler/jit_function.py:140``). Anything else is skipped
     silently (``:479-493``). A ``msgspec.Struct`` is not a scalar, so **no
-    value carried by ``Dims`` reaches the cache key**.
+    value carried by ``Dims`` reaches that key**.
 
     Today that is harmless: every other shape is a property derived from
     ``tp``, and ``tp`` reaches the key anyway as the plain ``int`` ``npes``
-    the kernel builders also take. Measured at equal row counts, TP 2, 4 and 8
-    produce three distinct keys.
+    the kernel builders also take. Measured on the real builder at equal row
+    counts, TP 2, 4 and 8 give three distinct keys, with the same TP computed
+    twice as the stability control.
 
     Add a second field -- an env-driven INTER padding is exactly the shape of
-    thing that would want one -- and that stops being true. The kernel would
-    change while the key did not, and the next server run would silently load
-    the previous build's kernel from ``~/.flydsl/cache``: wrong head counts,
-    wrong strides, no error anywhere. If a second field is genuinely needed,
-    it has to be passed to the builders as a scalar as well.
+    thing that would want one -- and that stops being true: the kernel would
+    change while nothing in the key did.
+
+    Scope, so this is not read as more than it is. The measurement above is of
+    ``_jit_function_cache_key``, and the artifact on disk is named by
+    ``_build_full_cache_key`` (a globals snapshot plus argument signatures,
+    ``:1363-1371``). This test pins the invariant that keeps ``tp`` reaching a
+    scalar at all; it is not a proof that the disk cache is sound. A separate,
+    open question is that the globals snapshot captures nothing from
+    ``sgl_amd_mono/common/`` -- measured, 73 globals captured and zero from
+    there.
     """
     assert Dims.__struct_fields__ == ("tp",)
