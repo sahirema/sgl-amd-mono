@@ -258,6 +258,9 @@ class _Built:
         recorder's per-layer context on the layers that still run SGLang's
         modules. The launches are deliberately not wrapped: they never enter
         SGLang's MoE modules, so there is nothing for the recorder to observe.
+        The model swaps that context for a ``nullcontext`` under the piecewise
+        prefill graph backend; this forward runs only on routed decode and
+        verify steps, so that branch has no counterpart here.
 
         Pipeline parallelism and two-batch overlap are absent here because the
         spec does not list those features, so the framework refuses them before
@@ -343,7 +346,23 @@ SPEC = MonoSpec(
             widths=WIDTHS, tp_sizes=TP_SIZES, resident_blocks=BLOCKS
         ),
     },
-    features=frozenset({Feature.SPECULATIVE_DECODING, Feature.KV_OFFLOAD}),
+    features=frozenset(
+        {
+            # one linear draft chain; config_disable_reasons refuses the rest,
+            # and RAGGED_VERIFY stays off: a verify step's rows are even here
+            Feature.SPECULATIVE_DECODING,
+            # HiCache, with the layer-first kernel backend that keeps the
+            # page16 SHUFFLE K / V (config_disable_reasons refuses the others)
+            Feature.KV_OFFLOAD,
+        }
+    ),
+    # NOT listed: Feature.EAGLE3_HIDDEN_STATES. ``_launch`` can hand the
+    # collector K1's residual after the input add (the attention boundary's
+    # hidden state), and that path is kept, but no run has ever checked those
+    # captures against the standard path's. Listing it would let a server
+    # start that silently trains a draft on unvalidated states; leaving it off
+    # refuses that server instead, and the capture code costs nothing until
+    # someone measures it.
     requires=Requirements(
         attention_backends=frozenset({"aiter"}),
         server_args={
