@@ -28,30 +28,28 @@ from flydsl.expr.typing import T
 
 from sgl_amd_mono.common.ops import (
     butterfly,
-    fp8x8_bf16_pk,
     lane_gather,
     mfma_bf16,
     permlane_swap,
-    readlane,
     rsrc,
     traced,
     uniform,
-    unlikely,
 )
+from sgl_amd_mono.common.plan import BLOCKS, THREADS, WAVES
 from sgl_amd_mono.minimax_m3.gfx950.config import (
-    BLOCKS,
     HEAD_DIM,
     INDEX_CP_FROM_BLOCKS,
     MAX_TOKENS,
-    ONE_INDEX_HEAD,
     SPARSE_BLOCK,
-    THREADS,
     TOPK_BLOCKS,
-    TP,
-    WAVES,
     IndexHeads,
 )
-from sgl_amd_mono.minimax_m3.gfx950.layout import ISCORE_BLOCKS
+from sgl_amd_mono.minimax_m3.gfx950.device import (
+    fp8x8_bf16_pk,
+    readlane,
+    unlikely,
+)
+from sgl_amd_mono.minimax_m3.gfx950.layout import Layout
 
 INDEX_BLOCK_BYTES = SPARSE_BLOCK * HEAD_DIM  # one fp8 index-K block
 KEY_TILES = SPARSE_BLOCK // 16  # MFMA row tiles of a block
@@ -120,7 +118,7 @@ def _pick(vals, k):
 def emit_index_scores(
     slot, lane, wave, red, mb_put, iscore, q_frag, tokens, q_len, init_blocks,
     local_blocks, scale, index_cache, block_table, seq_lens, bt_width,
-    wait_new_keys, prepare, heads=ONE_INDEX_HEAD, q_frag_head=None,
+    wait_new_keys, prepare, heads: IndexHeads, layout: Layout, q_frag_head=None,
     prepare_heads=None,
 ):  # fmt: skip
     """This CTA's (``slot``) share of the step's score tasks: up to BLOCKS tasks,
@@ -153,6 +151,10 @@ def emit_index_scores(
     (every lane its own h); ``prepare_heads()`` (with CTA barriers, on every CTA)
     makes those requests' rows' heads first. The other requests score as above."""
     assert local_blocks >= 1, "the block of the current token must be pinned"
+    # this build's TP and the stride of a token's whole score region: both were
+    # module constants of a build compiled for one TP, and are now per build
+    TP = heads.dims.tp  # noqa: N806
+    ISCORE_BLOCKS = layout.iscore_blocks  # noqa: N806
     l16 = lane % 16
     g4 = lane // 16
     rows = step_rows(seq_lens, tokens, q_len, heads)
@@ -396,7 +398,7 @@ def emit_index_scores(
             emit_cp_tasks()
 
 
-def q_frag_from(iq, heads=ONE_INDEX_HEAD):
+def q_frag_from(iq, heads: IndexHeads):
     """(``q_frag``, ``q_frag_head``) reading index q from memory: [token][head]
     [HEAD_DIM] bf16, ``heads.count`` heads a token."""
 

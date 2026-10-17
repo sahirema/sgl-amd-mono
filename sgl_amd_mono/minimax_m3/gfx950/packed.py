@@ -11,10 +11,10 @@ on the token count is done once.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import torch
 
+from sgl_amd_mono.common import guard
 from sgl_amd_mono.minimax_m3.gfx950.config import (
     HEAD_DIM,
     MAX_INDEX_BLOCKS,
@@ -65,6 +65,7 @@ class Packed:
         self.cpu_group = par.tp_group.cpu_group
         self.device = torch.device("cuda", torch.cuda.current_device())
         self.deadline_s = ctx.deadline_s
+        self.fault_site, self.fault_after = guard.fault_injection(self.rank) or (0, 0)
 
         layers = model.model.layers
         self.sparse_ids = [i for i, l in enumerate(layers) if l.is_layer_sparse]
@@ -115,6 +116,10 @@ class Packed:
             init_blocks=init_blocks,
             local_blocks=local_blocks,
             heads=heads,
+            # Traced into the guard, so a build per setting; the stall itself is
+            # a test hook and ``fault_injection`` returns None without its env var.
+            fault_site=self.fault_site or None,
+            fault_after=self.fault_after,
         )
 
     # -------------------------------------------------------------- caches
@@ -219,17 +224,17 @@ class Packed:
     def _alloc_buffers(self) -> None:
         """Scratch, the peer buffer, the step counter, the ``(ar, h_mid)`` pairs,
         each layer's fixed K1 arguments and the per-width row tables."""
-        from sgl_amd_mono.common import guard
         from sgl_amd_mono.common.peer import PeerBuffer
         from sgl_amd_mono.minimax_m3.gfx950.layout import Layout, sym_layout
-        from sgl_amd_mono.minimax_m3.gfx950.pre_attn import K1_ARGS
-        from sgl_amd_mono.minimax_m3.gfx950.pre_attn import (
-            SCRATCH_BYTES as K1_SCRATCH_BYTES,
-        )
+        from sgl_amd_mono.minimax_m3.gfx950.pre_attn import K1_ARGS, K1Layout
 
         dims, dev = self.dims, self.device
         self.layout = Layout(dims=dims)
-        self.scratch1 = torch.zeros(K1_SCRATCH_BYTES, dtype=torch.uint8, device=dev)
+        # K1's scratch follows the rank's head tasks, so it is sized from the
+        # same K1Layout the kernel builds rather than a module constant.
+        self.scratch1 = torch.zeros(
+            K1Layout(dims=dims).scratch_bytes, dtype=torch.uint8, device=dev
+        )
         self.scratch4 = torch.zeros(
             self.layout.scratch_bytes, dtype=torch.uint8, device=dev
         )
@@ -241,6 +246,12 @@ class Packed:
             self.sym_bytes + guard.FLAG_BYTES, self.cpu_group, self.rank, dims.tp, dev
         )
         self.flags_offset = self.sym_bytes
+        # The guard's block: the deadline the host writes once, and the sticky
+        # error words a failed wait sets. Word 0 is the launch counter the
+        # fault injection arms off; the mailbox tags come from ``step``, not
+        # from here, so nothing else reads it.
+        self.epoch = torch.zeros(guard.GUARD_WORDS, dtype=torch.int32, device=dev)
+        self.set_deadline(self.deadline_s)
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)
         bf16 = torch.bfloat16
         # row k = token k of the step; sparse layer i reads ars[i % 2] (the
@@ -282,6 +293,17 @@ class Packed:
             for n in range(1, MAX_TOKENS + 1)
         }
 
+    def set_deadline(self, seconds: float) -> None:
+        """Every wait's deadline, in ticks of the 100 MHz reference clock. The
+        kernels read it from the guard block, so a change takes effect on the
+        next launch without a rebuild -- and a graph replay reads the buffer
+        too."""
+        ticks = guard.deadline_ticks(seconds)
+        lo = ticks & 0xFFFFFFFF
+        # torch int32 is signed, and a deadline past ~21 s overflows the low word
+        self.epoch[guard.GUARD_DEADLINE] = lo - (1 << 32) if lo >= 1 << 31 else lo
+        self.epoch[guard.GUARD_DEADLINE + 1] = ticks >> 32
+
     # --------------------------------------------------------------- build
     def build_kernel(self, rows: int) -> M3Kernel:
         return M3Kernel(self, rows)
@@ -318,7 +340,6 @@ class M3Kernel:
         self.launcher = build_post_attn_kernel(
             tokens=rows,
             dims=packed.dims,
-            deadline_s=packed.deadline_s,
             flags_offset=packed.flags_offset,
             **packed.k4_build,
         )
@@ -355,7 +376,7 @@ class M3Kernel:
             _ptr(lw.bias), _ptr(lw.w13), _ptr(lw.s13), _ptr(lw.w2), _ptr(lw.s2),
             _ptr(p.h_mids[(i + 1) % 2]), _ptr(p.ars[(i + 1) % 2]),
             _ptr(p.scratch4), p.peers.local, _ptr(p.peers.addresses),
-            _ptr(p.step), p.rank, lw.layer_id,
+            _ptr(p.step), _ptr(p.epoch), p.rank, lw.layer_id,
             block_table.shape[1], memo["query_len"],
             _ptr(p.k1_args[i]), _ptr(positions),
             _ptr(forward_batch.out_cache_loc), _ptr(residual.view(n, HIDDEN_SIZE)),
@@ -374,6 +395,7 @@ class M3Kernel:
         reused buffer: the collector copies it)."""
         return self.packed.h[: self.rows]
 
-    def health(self) -> Optional[torch.Tensor]:
-        """The guard's error words, for the framework's fail-stop check."""
-        return self.packed.peers.bytes
+    # No ``health()``: a failed wait does not report back to the host. It sets
+    # its sticky error word, flags every peer and stops the launch with a store
+    # to the null page, so the process dies at the fault rather than running on
+    # with addresses computed from data that never arrived (``common/guard.py``).

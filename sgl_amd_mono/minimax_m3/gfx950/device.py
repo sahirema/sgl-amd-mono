@@ -4,12 +4,73 @@
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm
+from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr import rocdl
-from flydsl.expr.typing import T
+from flydsl.expr.typing import T, as_ir_value
 
-from sgl_amd_mono.common.ops import rsrc, uniform
+from sgl_amd_mono.common.ops import butterfly, rsrc, traced, uniform
+from sgl_amd_mono.common.plan import WAVES
 from sgl_amd_mono.minimax_m3.gfx950.config import LAYER_SLOTS
+
+
+def readlane(v, src_lane):
+    """Lane ``src_lane``'s value of v (wave-uniform)."""
+    bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
+    r = fx.Int32(rocdl.readlane(T.i32, bits, fx.Int32(src_lane)))
+    return r.bitcast(fx.Float32) if isinstance(v, fx.Float32) else r
+
+
+def unlikely(cond):
+    """``cond`` marked cold (llvm.expect): LLVM lays the branch out of the hot
+    path. A rare path's code inline among the hot stages costs them even when it
+    never runs (the long-context selection: S = 16, 3k context +1.4 us)."""
+    return fx.Boolean(
+        llvm.call_intrinsic(
+            ir.IntegerType.get_signless(1),
+            "llvm.expect.i1",
+            [as_ir_value(cond), as_ir_value(fx.Boolean(False))],
+            [],
+            [],
+        )
+    )
+
+
+def wave_sum(v):
+    return butterfly(v, (32, 16, 8, 4, 2, 1))
+
+
+def wave_max(v):
+    return butterfly(v, (32, 16, 8, 4, 2, 1), fx.max)
+
+
+@traced
+def block_max(v, lane, wave, red):
+    """Max of v over the CTA's WAVES waves; ``red`` needs WAVES words."""
+    wv = wave_max(v)
+    gpu.barrier()
+    if lane == 0:
+        fx.ptr_store(wv, red + wave)
+    gpu.barrier()
+    t = fx.ptr_load(red + 0)
+    for w in range_constexpr(1, WAVES):
+        t = fx.max(t, fx.ptr_load(red + w))
+    gpu.barrier()
+    return t
+
+
+def fp8x8_bf16_pk(words):
+    """Eight fp8 of two dwords -> bf16 MFMA operand (exact) by
+    v_cvt_scalef32_pk_bf16_fp8 (scale 1), two values an instruction."""
+    out = []
+    for w in words:
+        for hi in (False, True):
+            p = rocdl.cvt_scalef32_pk_bf16_fp8(
+                T.bf16x2, as_ir_value(fx.Int32(w)), as_ir_value(fx.Float32(1.0)), hi
+            )
+            out.append(fx.Vector(p).bitcast(fx.Int32)[0])
+    return fx.Vector.from_elements(out, fx.Int32).bitcast(fx.BFloat16)
 
 
 def step_tag(step_ptr, layer):

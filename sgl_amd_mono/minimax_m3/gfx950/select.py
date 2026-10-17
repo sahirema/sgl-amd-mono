@@ -16,7 +16,7 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr
 
 from sgl_amd_mono.common.ops import butterfly, traced
-from sgl_amd_mono.minimax_m3.gfx950.common.plan.execution import WAVES
+from sgl_amd_mono.common.plan import WAVES
 
 KEY_LEAST = -(2**31)  # the 32-bit key of a dead entry: below every live one
 BATCH = 16  # entries every lane reads a round of ``count_beaten``
