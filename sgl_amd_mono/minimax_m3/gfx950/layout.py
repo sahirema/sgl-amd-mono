@@ -208,11 +208,23 @@ class Layout(msgspec.Struct, frozen=True):
         Two stages share the region and the larger wins:
 
         * the attention PV partials index ``w * o_k_sub`` over WAVES waves
-          (``post_attn.py:1225``), needing ``WAVES * o_k_sub``;
+          (store ``post_attn.py:1198-1209``, reduce ``:1231-1233``), needing
+          ``WAVES * o_k_sub``;
         * the narrow MoE down stage stores at ``(k + 1) * WAVES * 64 + wave * 64
-          + lane`` scaled by 4, for k in 0..tokens-1 (``post_attn.py:2841``),
+          + lane`` scaled by 4, for k in 0..tokens-1 (``post_attn.py:2849``),
           needing ``(tokens + 1) * WAVES * 64 * 4``. Its reduction
-          (``:2855-2860``) reads strictly inside that, peaking 60 floats lower.
+          (``:2859-2868``) reads strictly inside that, peaking 60 floats lower.
+
+        The region's other tenants need no term of their own, but they are
+        listed because "the larger of two" is only safe if the set really is
+        exhaustive: the MoE up/gate partials and their reduction (``:1978``,
+        ``:1992``) and the shared-expert partials (``:2822``) peak at 2,048
+        floats, and ``route_top4`` -- which takes ``opart`` as its ``sig``
+        scratch (``:2708``, writing at ``:1638-1639``) -- needs
+        ``tokens * N_ROUTED``, 2,048 at the widest narrow case. ``opart`` is a
+        distinct array on the narrow build (``:459``); these stages reuse it in
+        time, separated by the barriers at ``:1979``, ``:2000``, ``:2710`` and
+        ``:2851``.
 
         Sizing on the attention term ALONE is the TP8 width-4 defect: ``o_k_sub``
         follows ``h_sub = local_q_heads // local_kv_heads``, and ``local_kv_heads``
@@ -223,8 +235,17 @@ class Layout(msgspec.Struct, frozen=True):
 
         Taking the max is a NO-OP at TP2 and TP4 (16,384 floats against a peak
         need of 6,144 at TP2's narrow widths 1-2 and 10,240 at TP4's 1-4), so it
-        cannot grow their LDS -- which matters because TP4 at width 16 has only
-        176 B of the 163,840 B budget spare. It grows TP8's narrow widths only.
+        cannot grow their LDS. Measured 2026-10-18 over every width below
+        ``wide_from`` at each TP: delta 0 B at TP2 and TP4, +8,192 B at TP8
+        width 4 and nowhere else.
+
+        That no-op is NOT what protects TP4's 176 B of headroom at width 16, and
+        an earlier version of this docstring said it was. Width 16 is WIDE, and
+        the declaration at ``post_attn.py:349`` is
+        ``1 if WIDE else narrow_opart_floats(tokens)`` -- so this helper is
+        never evaluated there at all. Sweeping it across widths 1..16 without
+        that filter reports growth on widths that cannot reach the branch; the
+        only widths that matter are those below ``wide_from``.
         """
         return max(WAVES * self.o_k_sub, (tokens + 1) * WAVES * 64 * 4)
 

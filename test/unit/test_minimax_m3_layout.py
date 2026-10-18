@@ -16,8 +16,10 @@ import pytest
 from sgl_amd_mono.common.plan import BLOCKS, THREADS
 from sgl_amd_mono.minimax_m3.gfx950.config import TP_SIZES, WIDTH_RANGE, Dims
 from sgl_amd_mono.minimax_m3.gfx950.layout import (
+    HEAD_DIM,
     N_DN,
     N_O,
+    N_ROUTED,
     N_ROUTER,
     N_SPLIT,
     SEL_LONG_PAIRS,
@@ -250,16 +252,45 @@ def test_narrow_opart_holds_every_reachable_width(tp):
     assert narrow, f"TP{tp} has no narrow widths"
     for tokens in narrow:
         capacity = layout.narrow_opart_floats(tokens)
-        attention_need = waves * layout.o_k_sub
-        down_need = (tokens + 1) * waves * 64 * 4
-        assert capacity >= attention_need, (
-            f"TP{tp} width {tokens}: opart {capacity} floats is below the "
-            f"attention PV partials' {attention_need}"
-        )
-        assert capacity >= down_need, (
-            f"TP{tp} width {tokens}: opart {capacity} floats is below the "
-            f"narrow down stage's {down_need}"
-        )
+        # Each entry mirrors the kernel's STORE INDEX EXPRESSION and asserts the
+        # highest element it can touch, NOT the capacity formula. That
+        # distinction is the point: an earlier version of this test computed
+        # ``(tokens + 1) * waves * 64 * 4``, which is what the helper itself
+        # returns, so a wrong helper reproduced the same wrong bound here and
+        # the test passed. Mirroring the addressing means the helper and the
+        # assertion fail independently.
+        h_sub = layout.h_sub
+        highest = {
+            # post_attn.py:1198-1209
+            #   wave * O_K_SUB + (g4 * 4 + e) * HEAD_DIM + 16 * jd + l16,
+            #   with (g4 * 4 + e) held under h_sub by the SPLIT_LIVE_G4 guard
+            "attention PV store": (
+                (waves - 1) * layout.o_k_sub
+                + (h_sub - 1) * HEAD_DIM
+                + HEAD_DIM
+                - 1
+            ),
+            # post_attn.py:1231-1233, guarded to tid < SPLIT_SLOTS so the
+            # four-per-thread walk covers exactly o_k_sub elements
+            "attention PV reduce": (
+                (waves - 1) * layout.o_k_sub + layout.o_k_sub - 1
+            ),
+            # post_attn.py:2849
+            #   ((k + 1) * WAVES * 64 + wave * 64 + lane) * 4 + 3,
+            #   k running 0..tokens-1
+            "narrow MoE down store": (
+                (tokens * waves * 64 + (waves - 1) * 64 + 63) * 4 + 3
+            ),
+            # post_attn.py:1638-1639, reached with opart as ``sig`` from :2708
+            "route_top4 scores": (tokens - 1) * N_ROUTED + 64 + 63,
+            # post_attn.py:1978 and :2822, both (wave * 64 + lane) * 4 + 3
+            "MoE up / shared partials": ((waves - 1) * 64 + 63) * 4 + 3,
+        }
+        for stage, index in highest.items():
+            assert index < capacity, (
+                f"TP{tp} width {tokens}: the {stage} reaches opart element "
+                f"{index}, but the region is only {capacity} floats"
+            )
 
 
 def test_tp8_narrow_opart_is_the_known_defect_not_a_passing_case():

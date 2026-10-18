@@ -85,21 +85,27 @@ TP_SIZES = (2, 4, 8)
 # pointers rather than an LDS overflow". That was never measured, and there is
 # now an arithmetically confirmed candidate that predicts exactly width 4:
 #
-#   ``opart`` is declared ``WAVES * O_K_SUB`` floats on the narrow path
-#   (``post_attn.py:342``), with ``O_K_SUB = h_sub * 128`` and ``h_sub =
+#   ``opart`` was declared ``WAVES * O_K_SUB`` floats on the narrow path
+#   (``post_attn.py:348``), with ``O_K_SUB = h_sub * 128`` and ``h_sub =
 #   local_q_heads // local_kv_heads``. TP2/TP4 get 16 q heads to a GQA group and
-#   so 16,384 floats; TP8 gets 8 (``local_kv_heads`` floors at 1, ``config.py:117``)
+#   so 16,384 floats; TP8 gets 8 (``local_kv_heads`` floors at 1, ``config.py:164``)
 #   and so only 8,192. The narrow down stage stores at ``opart + ((k+1)*WAVES*64
-#   + wave*64 + lane) * 4`` for k in 0..tokens-1 (``post_attn.py:2827-2830``),
+#   + wave*64 + lane) * 4`` for k in 0..tokens-1 (``post_attn.py:2849``),
 #   needing ``(tokens+1) * 2048`` floats. TP8 fits EXACTLY at 3 tokens and
 #   overruns by 2,048 floats (8 KB) at 4; TP2 (narrow widths 1-2) and TP4 (1-4)
 #   never do.
 #
 # The overrun lands in ``uexp``/``umask``/``hst``/``misc``/``route``/``rwt``
-# (``post_attn.py:343-380``), so a clobbered route entry becomes a garbage expert
-# index and then a wild weight pointer -- which reaches the observed (nil)
-# signature too. The signature therefore does NOT discriminate between the two
-# mechanisms, and neither is confirmed as THE cause.
+# (``post_attn.py:348-368``). The route-clobber story for the (nil) signature is
+# WEAK and should not be repeated: every ``route``/``rwt`` read for tokens 0-3
+# happens BEFORE the token-3 overflow store (``down_load(k+2)`` at ``:2828-2829``
+# reading at ``:2088`` and ``:2101-2103``, against the store at ``:2847-2850``),
+# so a within-wave wild pointer cannot arise; and ``fx.min(route,
+# SHARED_EXPERT)`` at ``:2088`` clamps from above, so a clobbered index would not
+# land in a page below 12 KB on five of eight ranks. The recorded signature was
+# three (nil), three 0x1000 and two 0x2000 -- a null or tiny base plus a small
+# rank-dependent offset, which fits an unpopulated pointer better than an LDS
+# clobber. Unresolved, and see the measured result below.
 #
 # THE SIZING IS NOW FIXED. ``layout.narrow_opart_floats`` takes the max of the
 # attention term and the down stage's, so TP8 width 4 gets 10,240 floats instead
@@ -108,22 +114,36 @@ TP_SIZES = (2, 4, 8)
 # which has only 176 B spare -- and TP8 16/16 now build clean under COMPILE_ONLY,
 # with the harness's own overflow control firing on the same image.
 #
-# THE FLOOR STAYS AT 5 ANYWAY, because a fix is not a confirmation:
-#   - the second candidate is untouched. Width 4 is the only TP8 width combining
-#     the narrow path, per-token UG placement and an uneven load
-#     (``ug_ctas_per_token(4)`` = 64 against ``ug_per_slot`` 24, so CTAs r<32 get
-#     two tasks and r>=32 one). If that is the cause, the sizing fix changes
-#     nothing.
-#   - a clean compile says nothing here by construction: the old DECLARATION was
-#     inside the LDS budget too; it was the dynamic extent of the USE that ran
-#     past it, and no static accounting checks that.
+# MEASURED 2026-10-18 ON EIGHT RANKS, and the answer was not the expected one.
+# Three arms, one ITT invocation each, image built per arm from a guarded tree:
 #
-# What would settle it, all needing 8 ranks to ourselves: run TP8 width 4 with
-# the floor lowered. Clean => the sizing was the cause and the floor can drop to
-# 1. Still faulting => the UG-placement candidate, testable by forcing
-# ``ug_ctas_per_token`` to None at width 4. Width 3 should run clean either way
-# (it fit exactly even before the fix); a width-3 fault would mean neither
-# candidate is the cause.
+#   fixed sizing + floor 1   -> clean, c=4 at 391.14 tok/s, median TPOT 6.47
+#   fixed sizing + floor 5   -> clean, c=4 at 279.83 tok/s, median TPOT 10.93
+#   OLD sizing   + floor 1   -> ALSO CLEAN, c=4 at 401.53 tok/s, TPOT 6.35
+#
+# The first two differ only in which code serves c=4, so the gap between them is
+# the runtime observable that the monokernel really ran at width 4. The third is
+# the positive control, and it did NOT fault. So:
+#
+#   - The historical TP8 width-4 fault DOES NOT REPRODUCE ON THIS PORT, with or
+#     without the sizing fix. It was recorded on the pre-port per-layer tree
+#     (m3-5.22-fusion-mono-tp8:20261016). "Clean after the fix" therefore
+#     attributes nothing; an earlier version of this comment set up a decision
+#     table that would have drawn exactly that wrong conclusion.
+#   - The overrun is nonetheless REAL -- the down store reaches element 10,239
+#     against an 8,192-float region, which is arithmetic, not a hypothesis --
+#     and the old-sizing arm served a full row while committing it. It is
+#     therefore SILENT. That is worse than a fault: nothing in a throughput run
+#     would reveal wrong output. Keep the fix; it just gets no credit here.
+#   - The UG-placement candidate is NOT isolated by width 3, contrary to what
+#     this comment used to claim. Unevenness is not unique to TP8 w4: TP4 w2 and
+#     w3 are uneven too and run clean on hardware. What is unique to TP8 w4 is
+#     per-token placement AND unevenness AND shared_after_routing false.
+#
+# THE FLOOR STAYS AT 5, now for a better reason than before: widths 1-4 at TP8
+# have never been checked for NUMERICS (v4 §12), and the point above shows that
+# "it runs" was never evidence about correctness. An accuracy gate is the
+# blocker, not another throughput run.
 #
 # A step outside its TP's range runs the model's normal forward, which the spec
 # dispatches: ``DeviceLimits.widths`` is declared per ISA rather than per TP, so
@@ -230,15 +250,30 @@ class Dims(msgspec.Struct, frozen=True):
         eight ranks (see ``WIDTH_RANGE``). Lowering it re-enables that path.
         Run it only on a node you have to yourself.
 
-        It is read HERE rather than at import, and nothing caches it, because
-        the floor depends on ``tp`` and the port resolves TP at build time --
-        the in-tree ancestor could key a module constant off an import-time TP
-        and a plugin has no such moment (see this module's docstring). Reading
-        it at the single chokepoint also keeps BUILD and ROUTING consistent:
-        ``widths`` below decides which kernels are compiled and
-        ``spec.py:210`` decides which steps are routed, and both come through
-        here. Overriding only one would route a step to a kernel that was
-        never built.
+        It is read HERE rather than at import because the floor depends on
+        ``tp`` and the port resolves TP at build time -- the in-tree ancestor
+        could key a module constant off an import-time TP and a plugin has no
+        such moment (see this module's docstring).
+
+        BUILD and ROUTING cannot disagree, but not for the reason an earlier
+        version of this docstring gave. It claimed ``widths`` below decides
+        which kernels are compiled; it does not, and has no caller outside this
+        module and its tests. The real chain is in ``minimax_m3/spec.py``: this
+        property is read ONCE at ``:210``, and the same ``(low, high)`` both
+        filters ``ctx.widths`` into ``self.kernels`` (``:219``) and is stored as
+        ``min_rows``/``max_rows`` for the routing guard at ``:240``. One read,
+        two uses -- so a mid-process change to the variable could not desync
+        them even if something tried.
+
+        It does NOT follow that the ranks agree. ``_gather_tp`` in the
+        framework (``srt/monokernels/runtime.py:182``) compares ``served``,
+        which is derived from ``spec.widths(isa)`` -- the per-ISA union, which
+        is identical on every rank whatever this returns -- and it runs BEFORE
+        ``spec.build`` at ``:198``, where this is first read. So that guard
+        cannot see a divergent value here. What makes divergence impossible is
+        operational, not enforced: all ranks of a TP group share one container
+        and one ``environment:`` block. Set per-rank values and the ranks that
+        raise would leave the rest waiting in the Packed collectives.
         """
         low, high = WIDTH_RANGE[self.tp]
         raw = os.environ.get(_MIN_WIDTH_ENV)
