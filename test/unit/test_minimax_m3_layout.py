@@ -14,7 +14,7 @@ here; this test keeps them from drifting afterwards.
 import pytest
 
 from sgl_amd_mono.common.plan import BLOCKS, THREADS
-from sgl_amd_mono.minimax_m3.gfx950.config import TP_SIZES, Dims
+from sgl_amd_mono.minimax_m3.gfx950.config import TP_SIZES, WIDTH_RANGE, Dims
 from sgl_amd_mono.minimax_m3.gfx950.layout import (
     N_DN,
     N_O,
@@ -218,3 +218,60 @@ def test_shared_after_routing_needs_an_even_ug_load(tp):
     assert [layout.shared_after_routing(s) for s in range(1, 17)] == [
         s % every == 0 for s in range(1, 17)
     ]
+
+
+@pytest.mark.parametrize("tp", TP_SIZES)
+def test_narrow_opart_holds_every_reachable_width(tp):
+    """``opart`` must hold the narrow MoE down stage's partials at every width
+    that TP actually routes to the kernels.
+
+    This is the test that was missing when TP8 width 4 faulted. ``opart`` is
+    declared ``WAVES * o_k_sub`` floats on the narrow path
+    (``post_attn.py:342``), and the down stage stores at
+    ``((k + 1) * WAVES * 64 + wave * 64 + lane) * 4`` for k in 0..tokens-1
+    (``post_attn.py:2827-2830``) -- so it needs ``(tokens + 1) * WAVES * 256``.
+    Capacity follows ``o_k_sub = h_sub * 128`` and ``h_sub = local_q_heads //
+    local_kv_heads``; because ``local_kv_heads`` floors at 1, TP8 gets 8 q heads
+    to a GQA group where TP2 and TP4 get 16, so TP8's region is HALF the size
+    while the need is TP-independent. TP8 fits exactly at 3 tokens and overruns
+    by 8 KB at 4.
+
+    The COMPILE_ONLY gate cannot catch this: the declaration is inside the LDS
+    budget, and it is the dynamic extent of the use that runs past it. Only
+    arithmetic over the reachable widths sees it, which is what this does.
+    """
+    layout = Layout(dims=Dims(tp=tp))
+    waves = THREADS // 64
+    capacity = waves * layout.o_k_sub
+    low, high = WIDTH_RANGE[tp]
+    narrow = [s for s in range(low, high + 1) if not layout.wide_moe(s)]
+    for tokens in narrow:
+        need = (tokens + 1) * waves * 64 * 4
+        assert need <= capacity, (
+            f"TP{tp} width {tokens}: narrow down stage needs {need} floats of "
+            f"opart but only {capacity} are declared"
+        )
+
+
+def test_tp8_narrow_opart_is_the_known_defect_not_a_passing_case():
+    """Negative control for the test above: prove it would FAIL if the floor of
+    5 were lowered, rather than passing because the arithmetic is toothless.
+
+    TP8 width 4 is the configuration that faulted on an 8-rank capture. The
+    guard that keeps it out of production is ``WIDTH_RANGE[8]`` starting at 5,
+    which is exactly ``wide_from`` -- not a fix to the region. If someone
+    reduces that floor, the test above must start failing.
+    """
+    layout = Layout(dims=Dims(tp=8))
+    waves = THREADS // 64
+    assert layout.wide_from == 5
+    assert WIDTH_RANGE[8][0] == layout.wide_from, (
+        "TP8's floor is what keeps the narrow path unreachable; if it drops "
+        "below wide_from, fix opart's size first"
+    )
+    # the shortfall is real, and exactly one 8 KB block
+    need = (4 + 1) * waves * 64 * 4
+    assert need - waves * layout.o_k_sub == 2048
+    # and width 3 fits exactly -- the measurement that would distinguish this
+    # sizing defect from the "unpopulated pointers" hypothesis
+    assert (3 + 1) * waves * 64 * 4 == waves * layout.o_k_sub

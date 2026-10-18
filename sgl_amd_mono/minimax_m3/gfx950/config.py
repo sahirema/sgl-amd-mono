@@ -75,12 +75,38 @@ TP_SIZES = (2, 4, 8)
 # The BOTTOM bound is a defect. TP8's narrow MoE path faults: measured on an
 # 8-rank decode graph capture, widths 16, 12 and 8 captured cleanly and then
 # width 4 took ``Memory access fault ... on address (nil)`` on all eight ranks.
-# Those are unpopulated pointers rather than an LDS overflow, which is why the
-# compile gate cannot see it -- every TP8 width builds clean. 4 is the first
-# width below ``layout.wide_from`` (5 at TP8), i.e. the first step on the narrow
-# path, and that path has needed TP-specific repair once before (it was sized by
-# HIDDEN instead of INTER, which broke TP2 at widths 3-4). Treat it as the same
-# class, unfixed at TP8.
+# 4 is the first width below ``layout.wide_from`` (5 at TP8), i.e. the first
+# step on the narrow path, and that path has needed TP-specific repair once
+# before (sized by HIDDEN instead of INTER, which broke TP2 at widths 3-4).
+#
+# An earlier version of this comment asserted the fault was "unpopulated
+# pointers rather than an LDS overflow". That was never measured, and there is
+# now an arithmetically confirmed candidate that predicts exactly width 4:
+#
+#   ``opart`` is declared ``WAVES * O_K_SUB`` floats on the narrow path
+#   (``post_attn.py:342``), with ``O_K_SUB = h_sub * 128`` and ``h_sub =
+#   local_q_heads // local_kv_heads``. TP2/TP4 get 16 q heads to a GQA group and
+#   so 16,384 floats; TP8 gets 8 (``local_kv_heads`` floors at 1, ``config.py:117``)
+#   and so only 8,192. The narrow down stage stores at ``opart + ((k+1)*WAVES*64
+#   + wave*64 + lane) * 4`` for k in 0..tokens-1 (``post_attn.py:2827-2830``),
+#   needing ``(tokens+1) * 2048`` floats. TP8 fits EXACTLY at 3 tokens and
+#   overruns by 2,048 floats (8 KB) at 4; TP2 (narrow widths 1-2) and TP4 (1-4)
+#   never do.
+#
+# The overrun lands in ``uexp``/``umask``/``hst``/``misc``/``route``/``rwt``
+# (``post_attn.py:343-380``), so a clobbered route entry becomes a garbage expert
+# index and then a wild weight pointer -- which reaches the observed (nil)
+# signature too. The signature therefore does NOT discriminate between the two
+# mechanisms, and neither is confirmed as THE cause.
+#
+# What would distinguish them: width 3 fits exactly and must run clean (a width-3
+# fault kills the sizing hypothesis), and a TP8 width-4 build with ``opart``
+# enlarged must lose the fault. The compile gate cannot see this either way --
+# the DECLARATION is within budget; it is the dynamic extent of the USE that runs
+# past it, and no static LDS accounting checks that.
+#
+# Not reachable as shipped: the floor of 5 is at ``wide_from``, so no TP8 step
+# ever takes the narrow path. This becomes live if anyone lowers the floor.
 #
 # A step outside its TP's range runs the model's normal forward, which the spec
 # dispatches: ``DeviceLimits.widths`` is declared per ISA rather than per TP, so
