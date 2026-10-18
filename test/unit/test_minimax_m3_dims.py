@@ -138,3 +138,41 @@ def test_tp_is_the_only_field_so_the_kernel_cache_cannot_go_stale():
     there.
     """
     assert Dims.__struct_fields__ == ("tp",)
+
+
+@pytest.mark.parametrize("tp", TP_SIZES)
+def test_min_width_env_is_absent_by_default(tp, monkeypatch):
+    """The hook must not change anything unless it is set. Guards against the
+    override leaking in from a developer's shell or a container's env block."""
+    monkeypatch.delenv("SGLANG_TEST_MONO_MIN_WIDTH", raising=False)
+    assert Dims(tp=tp).width_range == {2: (1, 12), 4: (1, 16), 8: (5, 16)}[tp]
+
+
+def test_min_width_env_lowers_the_floor_and_the_built_widths_follow(monkeypatch):
+    """Lowering the floor must move BOTH what is built and what is routed.
+
+    ``widths`` drives the kernels that get compiled and ``spec.py`` reads
+    ``width_range`` to decide which steps go to them. They share this one
+    property precisely so an override cannot route a step to a kernel that was
+    never built; this pins that.
+    """
+    monkeypatch.setenv("SGLANG_TEST_MONO_MIN_WIDTH", "1")
+    dims = Dims(tp=8)
+    assert dims.width_range == (1, 16)
+    assert dims.widths == tuple(range(1, 17))
+    assert 4 in dims.widths  # the width the TP8 floor exists to exclude
+
+
+def test_min_width_env_can_also_raise_the_floor(monkeypatch):
+    monkeypatch.setenv("SGLANG_TEST_MONO_MIN_WIDTH", "8")
+    assert Dims(tp=2).width_range == (8, 12)
+
+
+@pytest.mark.parametrize("bad", ["0", "17", "-1", "", "five", "4.5"])
+def test_min_width_env_refuses_a_value_it_cannot_honour(bad, monkeypatch):
+    """Loud, not silent: this is operator input, and a typo that quietly fell
+    back to the default would make a TP8 experiment look like a clean result
+    when the floor never moved."""
+    monkeypatch.setenv("SGLANG_TEST_MONO_MIN_WIDTH", bad)
+    with pytest.raises(ValueError, match="SGLANG_TEST_MONO_MIN_WIDTH"):
+        Dims(tp=8).width_range

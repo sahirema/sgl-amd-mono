@@ -16,6 +16,8 @@ import. A plugin has no such moment.
 
 from __future__ import annotations
 
+import os
+
 import msgspec
 
 from sgl_amd_mono.common.plan import padded
@@ -128,6 +130,10 @@ TP_SIZES = (2, 4, 8)
 # the framework cannot route this itself. The union below is what the spec
 # declares; the per-TP range is what it builds and serves.
 WIDTH_RANGE = {2: (1, 12), 4: (1, 16), 8: (5, 16)}
+# Test hook for the floor above; see ``Dims.width_range``. Named under the
+# SGLANG_TEST_MONO_ prefix because RFC #43949 decision 2 bans per-model env
+# vars and permits that prefix for test hooks.
+_MIN_WIDTH_ENV = "SGLANG_TEST_MONO_MIN_WIDTH"
 WIDTHS = tuple(range(1, MAX_TOKENS + 1))
 
 
@@ -213,8 +219,43 @@ class Dims(msgspec.Struct, frozen=True):
     @property
     def width_range(self) -> tuple[int, int]:
         """The inclusive (low, high) step width this TP can run; see
-        ``WIDTH_RANGE``."""
-        return WIDTH_RANGE[self.tp]
+        ``WIDTH_RANGE``.
+
+        ``SGLANG_TEST_MONO_MIN_WIDTH`` overrides the low bound. This is a TEST
+        HOOK -- RFC #43949 decision 2 bans per-model env vars but permits the
+        ``SGLANG_TEST_MONO_`` prefix for exactly this -- and it exists to make
+        the TP8 narrow-path fault reproducible without editing the table.
+
+        DANGER at TP8. The floor of 5 is there because width 4 faulted on all
+        eight ranks (see ``WIDTH_RANGE``). Lowering it re-enables that path.
+        Run it only on a node you have to yourself.
+
+        It is read HERE rather than at import, and nothing caches it, because
+        the floor depends on ``tp`` and the port resolves TP at build time --
+        the in-tree ancestor could key a module constant off an import-time TP
+        and a plugin has no such moment (see this module's docstring). Reading
+        it at the single chokepoint also keeps BUILD and ROUTING consistent:
+        ``widths`` below decides which kernels are compiled and
+        ``spec.py:210`` decides which steps are routed, and both come through
+        here. Overriding only one would route a step to a kernel that was
+        never built.
+        """
+        low, high = WIDTH_RANGE[self.tp]
+        raw = os.environ.get(_MIN_WIDTH_ENV)
+        if raw is None:
+            return low, high
+        try:
+            want = int(raw)
+        except ValueError:
+            raise ValueError(
+                f"{_MIN_WIDTH_ENV}={raw!r} is not an integer"
+            ) from None
+        if not 1 <= want <= high:
+            raise ValueError(
+                f"{_MIN_WIDTH_ENV}={want} is outside 1..{high}, the widths TP "
+                f"{self.tp} can build"
+            )
+        return want, high
 
     @property
     def widths(self) -> tuple[int, ...]:
