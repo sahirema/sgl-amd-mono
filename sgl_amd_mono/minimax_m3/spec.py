@@ -404,7 +404,15 @@ SPEC = MonoSpec(
         # which cannot separate a block-selection difference from FP8 noise --
         # the hidden state's band ran median 3.1%, p90 10.2%, worst 74.3%.
         #
-        # Treat them as a regression tripwire, not as a correctness claim.
+        # These are DOCUMENTATION, not enforcement. Verified against the
+        # framework at sglang 51faf5230: ``Numerics.bound()`` (``monokernels/
+        # spec.py:93-94``) has no caller anywhere in the tree, and the only
+        # consumer of ``numerics`` is ``monokernels/guards.py:143``, which reads
+        # ``kind`` alone -- to refuse ``--enable-deterministic-inference`` and
+        # ``--rl-on-policy-target`` for a non-BITWISE spec. Nothing compares a
+        # launch against these numbers at runtime, so do not read a passing
+        # server as evidence that the bands below held.
+        #
         # Tightening them needs a per-KV-head selection comparison against
         # AiterMiniMaxSelection at more than 16 blocks of context, which is
         # tracked separately and is the check that would actually bound this.

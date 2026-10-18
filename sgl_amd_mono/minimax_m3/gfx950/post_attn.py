@@ -1001,9 +1001,21 @@ def build_post_attn_kernel(
                     gpu.barrier()
                     acquire()
                     # Every pass' q heads. The surplus threads of a short map (TP8)
-                    # load a neighbouring token's q and drop it in ``store_q8``;
-                    # past the last token the buffer descriptor bounds the load and
-                    # returns zero, so the dead lanes are harmless either way.
+                    # load a neighbouring token's q and drop it in ``store_q8``.
+                    #
+                    # An earlier comment here claimed the buffer descriptor bounds
+                    # the load past the last token and returns zero. It does not:
+                    # ``rsrc`` takes an optional ``nbytes`` and this call omits it,
+                    # so ``num_records`` is left at its default maximum
+                    # (``common/ops.py:36-37``) and the load is unbounded. At TP8
+                    # width 16 the dead lanes of the last token read to element
+                    # 15 * 1024 + 2047 = 17,407 of a 16,384-element ``q``
+                    # (``packed.py:319-321``) -- 2 KB past the allocation.
+                    #
+                    # What makes it harmless is the ``store_q8`` guard below, which
+                    # drops those lanes before anything is written. The values are
+                    # never used, so numerics are unaffected; a fault would need
+                    # ``q`` to be the last block of its allocator segment.
                     qvs = [
                         ld_bf16x4(rsrc(q), tok * O_K + p * O_K_SUB + tid * 4, CM_K1)
                         for p in range(SPLIT_PASSES)
