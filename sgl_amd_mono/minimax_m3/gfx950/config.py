@@ -99,14 +99,29 @@ TP_SIZES = (2, 4, 8)
 # signature too. The signature therefore does NOT discriminate between the two
 # mechanisms, and neither is confirmed as THE cause.
 #
-# What would distinguish them: width 3 fits exactly and must run clean (a width-3
-# fault kills the sizing hypothesis), and a TP8 width-4 build with ``opart``
-# enlarged must lose the fault. The compile gate cannot see this either way --
-# the DECLARATION is within budget; it is the dynamic extent of the USE that runs
-# past it, and no static LDS accounting checks that.
+# THE SIZING IS NOW FIXED. ``layout.narrow_opart_floats`` takes the max of the
+# attention term and the down stage's, so TP8 width 4 gets 10,240 floats instead
+# of 8,192, and TP2/TP4 are byte-identical (their attention term already
+# dominates). Measured, not assumed: TP2 12/12, TP4 16/16 -- including width 16,
+# which has only 176 B spare -- and TP8 16/16 now build clean under COMPILE_ONLY,
+# with the harness's own overflow control firing on the same image.
 #
-# Not reachable as shipped: the floor of 5 is at ``wide_from``, so no TP8 step
-# ever takes the narrow path. This becomes live if anyone lowers the floor.
+# THE FLOOR STAYS AT 5 ANYWAY, because a fix is not a confirmation:
+#   - the second candidate is untouched. Width 4 is the only TP8 width combining
+#     the narrow path, per-token UG placement and an uneven load
+#     (``ug_ctas_per_token(4)`` = 64 against ``ug_per_slot`` 24, so CTAs r<32 get
+#     two tasks and r>=32 one). If that is the cause, the sizing fix changes
+#     nothing.
+#   - a clean compile says nothing here by construction: the old DECLARATION was
+#     inside the LDS budget too; it was the dynamic extent of the USE that ran
+#     past it, and no static accounting checks that.
+#
+# What would settle it, all needing 8 ranks to ourselves: run TP8 width 4 with
+# the floor lowered. Clean => the sizing was the cause and the floor can drop to
+# 1. Still faulting => the UG-placement candidate, testable by forcing
+# ``ug_ctas_per_token`` to None at width 4. Width 3 should run clean either way
+# (it fit exactly even before the fix); a width-3 fault would mean neither
+# candidate is the cause.
 #
 # A step outside its TP's range runs the model's normal forward, which the spec
 # dispatches: ``DeviceLimits.widths`` is declared per ISA rather than per TP, so

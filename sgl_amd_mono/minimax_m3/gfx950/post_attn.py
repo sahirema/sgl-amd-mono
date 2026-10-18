@@ -339,7 +339,15 @@ def build_post_attn_kernel(
         q8: fx.Array[fx.Int32, O_K // 4, 16]
         # PV partials, one split pass' heads (O_K_SUB == O_K at TP4). The wide
         # MoE's up partials reuse this region through ``fpool`` instead.
-        opart: fx.Array[fx.Float32, 1 if WIDE else WAVES * O_K_SUB, 16]
+        #
+        # Sized by ``narrow_opart_floats``, which takes the max of the attention
+        # term and the narrow MoE down stage's. This was ``WAVES * O_K_SUB`` --
+        # the attention term alone -- which is 8 KB short at TP8 width 4 and is
+        # a candidate cause of the fault that forced ``WIDTH_RANGE[8]`` to floor
+        # at 5. No-op at TP2 and TP4; see the docstring for why that matters.
+        opart: fx.Array[
+            fx.Float32, 1 if WIDE else layout.narrow_opart_floats(tokens), 16
+        ]
         # wide MoE: the step's distinct experts (the shared one last), token masks
         uexp: fx.Array[fx.Int32, U_MAX + 2, 16]
         umask: fx.Array[fx.Int32, U_MAX + 2, 16]

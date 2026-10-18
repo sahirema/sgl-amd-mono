@@ -242,14 +242,23 @@ def test_narrow_opart_holds_every_reachable_width(tp):
     """
     layout = Layout(dims=Dims(tp=tp))
     waves = THREADS // 64
-    capacity = waves * layout.o_k_sub
-    low, high = WIDTH_RANGE[tp]
-    narrow = [s for s in range(low, high + 1) if not layout.wide_moe(s)]
+    # Every width the kernels can be BUILT for on the narrow path, not just the
+    # ones WIDTH_RANGE currently routes: the TP8 floor of 5 is a quarantine of
+    # this very defect, so keying the test off WIDTH_RANGE would make it pass by
+    # construction at exactly the TP that is broken.
+    narrow = [s for s in range(1, 17) if not layout.wide_moe(s)]
+    assert narrow, f"TP{tp} has no narrow widths"
     for tokens in narrow:
-        need = (tokens + 1) * waves * 64 * 4
-        assert need <= capacity, (
-            f"TP{tp} width {tokens}: narrow down stage needs {need} floats of "
-            f"opart but only {capacity} are declared"
+        capacity = layout.narrow_opart_floats(tokens)
+        attention_need = waves * layout.o_k_sub
+        down_need = (tokens + 1) * waves * 64 * 4
+        assert capacity >= attention_need, (
+            f"TP{tp} width {tokens}: opart {capacity} floats is below the "
+            f"attention PV partials' {attention_need}"
+        )
+        assert capacity >= down_need, (
+            f"TP{tp} width {tokens}: opart {capacity} floats is below the "
+            f"narrow down stage's {down_need}"
         )
 
 
@@ -265,13 +274,27 @@ def test_tp8_narrow_opart_is_the_known_defect_not_a_passing_case():
     layout = Layout(dims=Dims(tp=8))
     waves = THREADS // 64
     assert layout.wide_from == 5
+    # The OLD sizing -- the attention term alone -- is what the defect was.
+    # Pinned here so the regression is described by a test rather than only by
+    # a comment: it is 2,048 floats (8 KB) short at width 4, and fits width 3
+    # with ZERO spare.
+    old_capacity = waves * layout.o_k_sub
+    assert (4 + 1) * waves * 64 * 4 - old_capacity == 2048
+    assert (3 + 1) * waves * 64 * 4 == old_capacity
+    # The fix covers width 4 and leaves TP2/TP4 untouched.
+    assert layout.narrow_opart_floats(4) == 10240
+    # The floor STAYS at wide_from until hardware says otherwise. Correct
+    # sizing makes lowering it plausible, not proven: the (nil) fault has two
+    # candidate causes and this addresses only one, so the floor may not drop
+    # until a TP8 width-4 decode runs clean on 8 ranks.
     assert WIDTH_RANGE[8][0] == layout.wide_from, (
-        "TP8's floor is what keeps the narrow path unreachable; if it drops "
-        "below wide_from, fix opart's size first"
+        "do not lower TP8's floor on the strength of the opart fix alone -- "
+        "run a TP8 width-4 decode first; the other candidate (uneven per-token "
+        "UG placement at width 4) is untouched by it"
     )
-    # the shortfall is real, and exactly one 8 KB block
-    need = (4 + 1) * waves * 64 * 4
-    assert need - waves * layout.o_k_sub == 2048
-    # and width 3 fits exactly -- the measurement that would distinguish this
-    # sizing defect from the "unpopulated pointers" hypothesis
-    assert (3 + 1) * waves * 64 * 4 == waves * layout.o_k_sub
+    for tp in (2, 4):
+        other = Layout(dims=Dims(tp=tp))
+        for s in range(1, other.wide_from):
+            assert other.narrow_opart_floats(s) == waves * other.o_k_sub, (
+                f"TP{tp} width {s}: the fix must not grow LDS here"
+            )

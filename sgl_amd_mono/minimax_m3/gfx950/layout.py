@@ -202,6 +202,32 @@ class Layout(msgspec.Struct, frozen=True):
     def o_k_sub(self) -> int:
         return self.h_sub * HEAD_DIM
 
+    def narrow_opart_floats(self, tokens: int) -> int:
+        """``opart``'s size on the NARROW MoE path, in floats.
+
+        Two stages share the region and the larger wins:
+
+        * the attention PV partials index ``w * o_k_sub`` over WAVES waves
+          (``post_attn.py:1225``), needing ``WAVES * o_k_sub``;
+        * the narrow MoE down stage stores at ``(k + 1) * WAVES * 64 + wave * 64
+          + lane`` scaled by 4, for k in 0..tokens-1 (``post_attn.py:2841``),
+          needing ``(tokens + 1) * WAVES * 64 * 4``. Its reduction
+          (``:2855-2860``) reads strictly inside that, peaking 60 floats lower.
+
+        Sizing on the attention term ALONE is the TP8 width-4 defect: ``o_k_sub``
+        follows ``h_sub = local_q_heads // local_kv_heads``, and ``local_kv_heads``
+        floors at 1, so a TP8 rank has 8 q heads to a GQA group where TP2 and TP4
+        have 16 -- half the region -- while the down stage's need does not depend
+        on TP at all. TP8 then fits exactly at 3 tokens and overruns by 2,048
+        floats at 4, into ``uexp`` / ``route`` / ``rwt``.
+
+        Taking the max is a NO-OP at TP2 and TP4 (16,384 floats against a peak
+        need of 6,144 at TP2's narrow widths 1-2 and 10,240 at TP4's 1-4), so it
+        cannot grow their LDS -- which matters because TP4 at width 16 has only
+        176 B of the 163,840 B budget spare. It grows TP8's narrow widths only.
+        """
+        return max(WAVES * self.o_k_sub, (tokens + 1) * WAVES * 64 * 4)
+
     @property
     def split_passes(self) -> int:
         return self.dims.local_kv_heads
