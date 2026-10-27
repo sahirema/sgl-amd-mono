@@ -10,7 +10,9 @@ on the token count is done once.
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 
 import torch
 
@@ -42,6 +44,24 @@ SGLANG_READS = {
         "index_topk_freq",
     ),
 }
+
+
+def compile_only(launch) -> None:
+    """Compile a launch for this process without running it (FlyDSL's compile-only
+    mode, for the one call); the first real call then only loads the code."""
+    from flydsl.utils.env import CompileEnvManager
+
+    names = [n for n in inspect.signature(launch.func).parameters if n != "stream"]
+    var = CompileEnvManager.options["compile_only"].env_var
+    old = os.environ.get(var)
+    os.environ[var] = "1"
+    try:
+        launch(*([0] * len(names)), stream=torch.cuda.current_stream())
+    finally:
+        if old is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = old
 
 
 def _need(ok: bool, what: str) -> None:
