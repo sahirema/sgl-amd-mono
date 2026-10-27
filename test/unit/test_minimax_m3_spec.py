@@ -49,6 +49,7 @@ VL = SimpleNamespace(
 )
 # the EAGLE3 recipe's server arguments the spec reads
 CFG = SimpleNamespace(
+    tp_size=4,
     speculative_algorithm="EAGLE3",
     speculative_eagle_topk=1,
     speculative_num_steps=3,
@@ -154,3 +155,23 @@ def test_the_recipe_routes_verify_batches_of_one_to_four():
     assert covered_capture_sizes(
         widths=m3.SPEC.widths("gfx950"), tokens_per_request=4, sizes=[1, 2, 4, 8]
     ) == [1, 2, 3, 4, 8]
+
+
+def test_tp8_defaults_the_unpadded_expert_layout(monkeypatch):
+    # at TP8 the kernels need SGLANG_AITER_K3_OPT; unset, the spec turns it on for the workers
+    monkeypatch.delenv(m3.K3_OPT_ENV, raising=False)
+    assert _config_reasons(cfg=_replace(CFG, tp_size=8)) == []
+    assert m3.os.environ[m3.K3_OPT_ENV] == "1"
+
+
+def test_tp8_with_the_expert_layout_switched_off_is_one_reason(monkeypatch):
+    monkeypatch.setenv(m3.K3_OPT_ENV, "0")
+    reasons = _config_reasons(cfg=_replace(CFG, tp_size=8))
+    assert len(reasons) == 1 and m3.K3_OPT_ENV in reasons[0]
+
+
+@pytest.mark.parametrize("tp", [2, 4])
+def test_tp2_and_tp4_leave_the_expert_layout_alone(monkeypatch, tp):
+    monkeypatch.delenv(m3.K3_OPT_ENV, raising=False)
+    assert _config_reasons(cfg=_replace(CFG, tp_size=tp)) == []
+    assert m3.K3_OPT_ENV not in m3.os.environ
