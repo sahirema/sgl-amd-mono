@@ -217,6 +217,12 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
             f"{N_ROUTED} routed + the fused shared expert with native MXFP4 "
             "shared-expert fusion and no expert parallelism",
         )
+        # SiTU interleaves gate and up rows (A16W4), still marked shuffled; the kernel reads them apart
+        activation = experts.moe_runner_config.activation
+        _need(
+            activation == "silu",
+            f"layer {layer_id}: expert activation {activation!r}, built for 'silu'",
+        )
         # FusedMoE counts the fused shared expert in its top_k
         routed_top_k = int(experts.top_k) - int(experts.num_fused_shared_experts)
         _need(
