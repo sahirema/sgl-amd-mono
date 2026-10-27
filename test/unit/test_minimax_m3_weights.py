@@ -141,6 +141,8 @@ def build_layer(tp, torch, **tweak):
         num_fused_shared_experts=1,
         top_k=v["top_k"],  # FusedMoE counts the fused shared expert in its top_k
         intermediate_size_per_partition=v["inter"],
+        # SGLang interleaves a SiTU activation's gate and up rows; the kernels read SiLU's
+        moe_runner_config=types.SimpleNamespace(activation="silu"),
         w13_weight=w13,
         w2_weight=w2,
         w13_weight_scale=FakeTensor((E, 2 * v["inter"], HIDDEN // 32), u8),
@@ -244,6 +246,66 @@ def test_the_refusal_names_the_rank_width_it_wanted(tp, weights):
         load(weights, tp, inter=want["inter"] // 2)
     with pytest.raises(ValueError, match=rf"want \({HIDDEN}, {want['o_k']}\)"):
         load(weights, tp, o_k=want["o_k"] + 128)
+
+
+def _set(obj, path, value):
+    *owners, name = path.split(".")
+    for owner in owners:
+        obj = getattr(obj, owner)
+    setattr(obj, name, value)
+
+
+# #8's view refusals (its test_minimax_m3_spec.py, at TP4), at every TP size: each
+# is one setting a loaded layer can have that the kernels would misread
+VIEW_REFUSALS = {
+    "index values": ("self_attn.disable_index_value", lambda torch, tp: False),
+    # indexer context parallelism: more index heads than the rank's own
+    "index heads": ("self_attn.num_idx_heads", lambda torch, tp: 4),
+    "fp8 o_proj": (
+        "self_attn.o_proj",
+        lambda torch, tp: types.SimpleNamespace(
+            weight=FakeTensor((HIDDEN, EXPECTED[tp]["o_k"]), torch.float8_e4m3fn)
+        ),
+    ),
+    # the same shape, not AITER-shuffled
+    "unshuffled experts": (
+        "mlp.experts.w13_weight",
+        lambda torch, tp: FakeTensor(
+            (E, 2 * EXPECTED[tp]["inter"], HIDDEN // 2), torch.uint8
+        ),
+    ),
+    "interleaved gate and up": (
+        "mlp.experts.moe_runner_config",
+        lambda torch, tp: types.SimpleNamespace(activation="situ"),
+    ),
+    "no fused shared expert": ("mlp.experts.num_local_experts", lambda torch, tp: N_ROUTED),
+    "expert parallel": ("mlp.experts.moe_ep_rank", lambda torch, tp: 1),
+    "no routing bias": ("mlp.e_score_correction_bias", lambda torch, tp: None),
+    # not a GemmaRMSNorm
+    "norm type": (
+        "input_layernorm",
+        lambda torch, tp: types.SimpleNamespace(
+            weight=FakeTensor((HIDDEN,), torch.bfloat16)
+        ),
+    ),
+    "per-head k scale": (
+        "self_attn.attn",
+        lambda torch, tp: types.SimpleNamespace(
+            k_scale=torch.ones(4, dtype=torch.float32), v_scale=None
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("tp", TP_SIZES)
+@pytest.mark.parametrize("case", VIEW_REFUSALS)
+def test_each_unsupported_view_is_refused(case, tp, weights):
+    torch = sys.modules["torch"]
+    layer = build_layer(tp, torch)
+    path, value = VIEW_REFUSALS[case]
+    _set(layer, path, value(torch, tp))
+    with pytest.raises(ValueError):
+        weights.SparseMoeLayer.from_layer(layer, 7, Dims(tp=tp).index_heads, {})
 
 
 def test_context_parallel_index_heads_are_refused(weights):
