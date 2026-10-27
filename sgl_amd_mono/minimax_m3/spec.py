@@ -35,11 +35,17 @@ the standard path and writes the context the kernels later read. Stock SGLang's
 -- ``sparse_kv_views`` is a zero-copy ``.view()`` over it -- but fills it in NHD
 order, because the SHUFFLE order comes only from
 ``aiter.reshape_and_cache(..., asm_layout=True)``, which #41998 introduces.
+
+``SGLANG_AMD_MONO_CHECK=1`` runs SGLang's modules on a copy of every sparse layer's
+input in eager steps and logs both outputs' differences on the live rows
+(``sgl_amd_mono/minimax/check.py``); the bounds in ``NUMERICS`` come from these runs.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -65,9 +71,9 @@ except ModuleNotFoundError:  # SGLang before sgl-project/sglang#45389
 if TYPE_CHECKING:  # annotations only, under ``from __future__ import annotations``
     from sglang.srt.monokernels.spec import BuildContext, Plan
 
-# The interface version a spec declares, where SGLang still versions it (sglang 51faf52
-# requires ``MonoSpec.api_version``; the SGLang main targets takes no such field). Read
-# from the module MonoSpec came from, so either SGLang gets what it expects.
+# The interface version a spec declares (``MonoSpec.api_version``), read from the module
+# MonoSpec came from rather than written as a literal, so the spec states the version of
+# the SGLang it loads under; omitted if that SGLang does not version the interface.
 MONOKERNEL_API_VERSION = getattr(
     sys.modules[MonoSpec.__module__], "MONOKERNEL_API_VERSION", None
 )
@@ -113,17 +119,93 @@ SGLANG_READS = {
         "final_norm",
     ),
     "srt/layers/aux_hidden_states.py": ("AuxHiddenStateList",),
+    # check mode's reference forward
+    "srt/layers/layer_boundary/residual/stream.py": (
+        "ResidualStream",
+        "from_handoff",
+        "export",
+        "write",
+        "record",
+    ),
     # Requirements.env keys. Not imports, so the contract test would not
     # otherwise guard them -- but an env var this spec requires and SGLang does
     # not define would make the requirement unsatisfiable at startup, which is
     # worth catching here rather than there.
+    # the server arguments ``SPEC.requires`` and config_disable_reasons read
+    "srt/arg_groups/fields/*.py": (
+        "kv_cache_dtype",
+        "page_size",
+        "moe_runner_backend",
+        "disable_shared_experts_fusion",
+        "speculative_algorithm",
+        "speculative_eagle_topk",
+        "speculative_num_steps",
+        "speculative_num_draft_tokens",
+        "enable_hierarchical_cache",
+        "hicache_io_backend",
+        "hicache_mem_layout",
+        "enable_lmcache",
+        "enable_flexkv",
+        "disaggregation_decode_enable_offload_kvcache",
+        "enable_hisparse",
+        "expert_distribution_recorder_mode",
+    ),
+    # Requirements.env keys and ``envs``. #41998's switches are not here: they are read
+    # by name (PENDING_ENV), so an SGLang without them is refused with a reason.
     "srt/environ.py": (
-        "SGLANG_MINIMAX_M3_INDEX_TOPK_FREQ",
         "SGLANG_USE_AITER",
-        "SGLANG_M3_USE_AITER_SPARSE_PA",  # #41998
-        "SGLANG_M3_USE_AITER_PREFILL_INDEXER",  # #41998
+        "SGLANG_MINIMAX_M3_INDEX_TOPK_FREQ",
+        "SGLANG_OPT_MINIMAX_M3_FP8_INDEX_CACHE",
+        "SGLANG_SIMULATE_UNIFORM_EXPERTS",
+        "SGLANG_SIMULATE_ROUND_ROBIN_EXPERTS",
+        "envs",
     ),
 }
+
+
+# Check mode's bounds: ``minimax/check.py`` logs, per sparse layer, each output's largest
+# difference over the largest reference value (rel) and least row cosine on the live rows,
+# the MLP output on the rows routed alike; test/e2e/test_minimax_m3_server.py holds every
+# launch to these. Measured at TP4 (#8).
+NUMERICS = Numerics(
+    NumericsKind.TOLERANCE,
+    {
+        "layer.residual.rel": 0.1,
+        "layer.residual.cosine": 0.995,
+        "layer.mlp_out.rel": 0.5,
+        "layer.mlp_out.cosine": 0.4,
+    },
+)
+
+
+def _has_flydsl() -> bool:
+    return importlib.util.find_spec("flydsl") is not None
+
+
+# switches of sgl-project/sglang#41998 (on #41708) for the page16 SHUFFLE K / V, not in main yet:
+# read by name, so an SGLang without them is refused with a reason; pin in SGLANG_READS once merged
+PENDING_ENV = {
+    # prefill writes the page16 SHUFFLE K / V the kernels read
+    "SGLANG_M3_USE_AITER_SPARSE_PA": True,
+    "SGLANG_M3_USE_AITER_PREFILL_INDEXER": True,
+    "SGLANG_M3_USE_AITER_INDEXER": True,
+}
+
+
+def _pending_env_reasons() -> list[str]:
+    from sglang.srt.environ import envs
+
+    reasons = []
+    for name, want in PENDING_ENV.items():
+        var = getattr(envs, name, None)
+        if var is None:
+            reasons.append(
+                f"needs SGLang with {name} (the page16 SHUFFLE K / V of "
+                "sgl-project/sglang#41998 and #41708)"
+            )
+        elif var.get() != want:
+            reasons.append(f"{name} {var.get()!r} is not {want!r}")
+    return reasons
 
 
 def _text_config(hf_config):
@@ -153,6 +235,12 @@ def config_disable_reasons(cfg, hf_config) -> list[str]:
         reasons.append(
             f"{t.num_hidden_layers} layers, the mailbox epochs hold {LAYER_SLOTS}"
         )
+    from sgl_amd_mono.minimax_m3.gfx950.weights import sparse_selection
+
+    try:
+        sparse_selection(t)
+    except ValueError as e:
+        reasons.append(str(e))
     if cfg.speculative_algorithm is not None and (
         cfg.speculative_eagle_topk != 1
         or cfg.speculative_num_draft_tokens != cfg.speculative_num_steps + 1
@@ -168,7 +256,11 @@ def config_disable_reasons(cfg, hf_config) -> list[str]:
             "HiCache keeps the page16 SHUFFLE K / V only with --hicache-io-backend "
             "kernel and --hicache-mem-layout layer_first"
         )
-    return reasons
+    if cfg.enable_lmcache or cfg.enable_flexkv or cfg.disaggregation_decode_enable_offload_kvcache:  # fmt: skip
+        reasons.append("KV offload other than HiCache")
+    if not _has_flydsl():
+        reasons.append("needs FlyDSL")
+    return reasons + _pending_env_reasons()
 
 
 def model_disable_reasons(model, hf_config, copies: dict) -> list[str]:
@@ -220,6 +312,7 @@ class _Built:
         self.lm, self.model = model, model.model
         self.sparse_ids = _sparse_ids(self.model.layers)
         self.first_layer = self.sparse_ids[0]
+        self.check = os.environ.get("SGLANG_AMD_MONO_CHECK", "0") == "1"
 
         # Only the widths this TP can actually run. DeviceLimits.widths is
         # declared per ISA, so the framework hands us the union; a step outside
@@ -345,16 +438,52 @@ class _Built:
         """
         from sglang.srt.layers.layer_boundary.residual.batch import stream_of
 
+        import torch
+
         stream = stream_of(forward_batch)
         hidden, residual = stream.export(hidden)
+        check = self.check and not torch.cuda.is_current_stream_capturing()
+        ref = (
+            self._reference(layer_id, positions, forward_batch, hidden, residual)
+            if check
+            else None
+        )
         output, residual = kernel.launch(
             layer_id, positions, hidden, residual, forward_batch, memo
         )
+        if ref is not None:
+            from sgl_amd_mono.minimax.check import log_check
+            from sgl_amd_mono.minimax_m3.gfx950.config import TOP_K
+
+            live = forward_batch.out_cache_loc[: kernel.rows] > 0
+            log_check(layer, layer_id, live, (output, residual), ref, TOP_K)
         if capture is not None:
             # the collector copies this reused kernel buffer
             capture.capture(kernel.capture_input())
         stream.write(residual)
         return stream.record(output, layer.ffn_boundary.declaration.update)
+
+    def _reference(self, lid, positions, forward_batch, ar, residual):
+        """Check mode: SGLang's layer ``lid`` on a copy of the launch's input pair.
+
+        Runs on a residual stream of its own and returns (MLP output, residual) as the
+        launch does. It writes the same KV slots, which the launch then writes again."""
+        from sglang.srt.layers.layer_boundary.residual.stream import ResidualStream
+
+        layer = self.model.layers[lid]
+        update = self.model.layers[lid - 1].ffn_boundary.declaration.update
+        hidden, stream = ResidualStream.from_handoff(
+            ar.clone(), residual.clone(), update
+        )
+        original = forward_batch.residual_stream
+        forward_batch.residual_stream = stream
+        try:
+            out = layer(
+                positions=positions, forward_batch=forward_batch, hidden_states=hidden
+            )
+            return stream.export(out)
+        finally:
+            forward_batch.residual_stream = original
 
 
 def build(model, hf_config, ctx: BuildContext) -> _Built:
@@ -379,15 +508,13 @@ SPEC = MonoSpec(
             # HiCache, with the layer-first kernel backend that keeps the
             # page16 SHUFFLE K / V (config_disable_reasons refuses the others)
             Feature.KV_OFFLOAD,
+            # ``_launch`` hands the collector K1's residual after the input add,
+            # the hidden state SGLang's attention boundary hands EAGLE3 -- the
+            # same tensor #8 captured. test/e2e/test_minimax_m3_server.py's
+            # verify test serves an EAGLE3 draft through it.
+            Feature.EAGLE3_HIDDEN_STATES,
         }
     ),
-    # NOT listed: Feature.EAGLE3_HIDDEN_STATES. ``_launch`` can hand the
-    # collector K1's residual after the input add (the attention boundary's
-    # hidden state), and that path is kept, but no run has ever checked those
-    # captures against the standard path's. Listing it would let a server
-    # start that silently trains a draft on unvalidated states; leaving it off
-    # refuses that server instead, and the capture code costs nothing until
-    # someone measures it.
     requires=Requirements(
         # The attention weights the kernels quantize to private FP8 copies are
         # read as bf16 (``weights.py:68-71``), which refuses anything else --
@@ -401,8 +528,14 @@ SPEC = MonoSpec(
             # the kernels index 128-token pages and write fp8_e4m3 K / V
             "page_size": frozenset({SPARSE_BLOCK}),
             "kv_cache_dtype": frozenset({"fp8_e4m3"}),
+            "moe_runner_backend": frozenset({"auto", "aiter"}),
             # they run the shared expert as the fused expert of the MXFP4 MoE
             "disable_shared_experts_fusion": frozenset({False}),
+            "speculative_algorithm": frozenset({None, "EAGLE3"}),
+            # HiSparse maps the logical KV slots to device rows; the kernels write raw slots
+            "enable_hisparse": frozenset({False}),
+            # the launches record no expert distribution
+            "expert_distribution_recorder_mode": frozenset({None}),
         },
         env={
             # the kernels select blocks in every layer, so there is no indexer
@@ -410,33 +543,15 @@ SPEC = MonoSpec(
             # only in the first of each bucket
             "SGLANG_MINIMAX_M3_INDEX_TOPK_FREQ": 1,
             "SGLANG_USE_AITER": True,  # they read aiter's MXFP4 MoE layout
-            # they read the page16 SHUFFLE K / V prefill selects and writes
-            "SGLANG_M3_USE_AITER_SPARSE_PA": True,
-            "SGLANG_M3_USE_AITER_PREFILL_INDEXER": True,
+            # the index-K cache the kernels score is FP8
+            "SGLANG_OPT_MINIMAX_M3_FP8_INDEX_CACHE": True,
+            # benchmark routing overrides: the kernels route with the model's own router
+            "SGLANG_SIMULATE_UNIFORM_EXPERTS": False,
+            "SGLANG_SIMULATE_ROUND_ROBIN_EXPERTS": False,
+            # #41998's page16 SHUFFLE K / V switches are checked by name (PENDING_ENV)
         },
     ),
-    numerics=Numerics(
-        kind=NumericsKind.TOLERANCE,
-        # MEASURED BANDS, not a derived tolerance. These come from the in-tree
-        # check mode comparing each launch against the module path on the same
-        # GPU, and they are wide because the metric is whole-tensor max|diff|,
-        # which cannot separate a block-selection difference from FP8 noise --
-        # the hidden state's band ran median 3.1%, p90 10.2%, worst 74.3%.
-        #
-        # These are DOCUMENTATION, not enforcement. Verified against the
-        # framework at sglang 51faf5230: ``Numerics.bound()`` (``monokernels/
-        # spec.py:93-94``) has no caller anywhere in the tree, and the only
-        # consumer of ``numerics`` is ``monokernels/guards.py:143``, which reads
-        # ``kind`` alone -- to refuse ``--enable-deterministic-inference`` and
-        # ``--rl-on-policy-target`` for a non-BITWISE spec. Nothing compares a
-        # launch against these numbers at runtime, so do not read a passing
-        # server as evidence that the bands below held.
-        #
-        # Tightening them needs a per-KV-head selection comparison against
-        # AiterMiniMaxSelection at more than 16 blocks of context, which is
-        # tracked separately and is the check that would actually bound this.
-        bounds={"layer.hidden.rel": 0.75, "layer.residual.rel": 0.05},
-    ),
+    numerics=NUMERICS,
     model_disable_reasons=model_disable_reasons,
     config_disable_reasons=config_disable_reasons,
     build=build,
