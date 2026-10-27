@@ -178,6 +178,30 @@ NUMERICS = Numerics(
 )
 
 
+# TP8: a rank's MoE width is 3072 / 8 = 384, which aiter pads to 512 unless
+# SGLANG_AITER_K3_OPT is on (quark_w4a4_mxfp4_moe.py, ``pad_for_aiter``), and the kernels read
+# the unpadded 384-wide experts. SGLang reads the switch once, when each TP worker imports that
+# module; the workers are spawned after the server arguments resolve, which is when SGLang runs
+# config_disable_reasons, so the switch is defaulted on here rather than asked of every user.
+# At TP2 / TP4 the width is a multiple of 256 and nothing is padded either way, so it is left
+# alone there: it also picks the model path's MoE kernels.
+K3_OPT_ENV = "SGLANG_AITER_K3_OPT"
+
+
+def _tp8_expert_layout_reasons(cfg) -> list[str]:
+    if cfg.tp_size != 8:
+        return []
+    if K3_OPT_ENV not in os.environ:
+        os.environ[K3_OPT_ENV] = "1"
+        logger.info("minimax_m3 mono at TP8: %s defaulted to 1 (unpadded experts)", K3_OPT_ENV)
+    if os.environ[K3_OPT_ENV].lower() not in ("1", "true"):
+        return [
+            f"TP8 needs {K3_OPT_ENV}=1 (or unset): the kernels read the unpadded "
+            "384-wide experts, which aiter pads to 512 without it"
+        ]
+    return []
+
+
 def _has_flydsl() -> bool:
     return importlib.util.find_spec("flydsl") is not None
 
@@ -260,6 +284,7 @@ def config_disable_reasons(cfg, hf_config) -> list[str]:
         reasons.append("KV offload other than HiCache")
     if not _has_flydsl():
         reasons.append("needs FlyDSL")
+    reasons += _tp8_expert_layout_reasons(cfg)
     return reasons + _pending_env_reasons()
 
 
