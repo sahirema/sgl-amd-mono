@@ -6,8 +6,9 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import gpu, range_constexpr, rocdl
+from flydsl.expr import gpu
 from flydsl.expr import math as fmath
+from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
 from sgl_amd_mono.common.ops import butterfly, rsrc, uniform, wave_max

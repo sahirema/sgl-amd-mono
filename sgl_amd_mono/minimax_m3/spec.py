@@ -110,9 +110,7 @@ SGLANG_READS = {
         "Requirements",
     ),
     "srt/runtime_context.py": ("get_parallel",),
-    "srt/eplb/expert_distribution.py": (
-        "get_global_expert_distribution_recorder",
-    ),
+    "srt/eplb/expert_distribution.py": ("get_global_expert_distribution_recorder",),
     "srt/layers/layer_boundary/residual/batch.py": (
         "start",
         "stream_of",
@@ -193,7 +191,9 @@ def _tp8_expert_layout_reasons(cfg) -> list[str]:
         return []
     if K3_OPT_ENV not in os.environ:
         os.environ[K3_OPT_ENV] = "1"
-        logger.info("minimax_m3 mono at TP8: %s defaulted to 1 (unpadded experts)", K3_OPT_ENV)
+        logger.info(
+            "minimax_m3 mono at TP8: %s defaulted to 1 (unpadded experts)", K3_OPT_ENV
+        )
     if os.environ[K3_OPT_ENV].lower() not in ("1", "true"):
         return [
             f"TP8 needs {K3_OPT_ENV}=1 (or unset): the kernels read the unpadded "
@@ -461,9 +461,8 @@ class _Built:
         (the kernel applies it with the input norm) and returns its own MLP
         output, already all-reduced, the same way.
         """
-        from sglang.srt.layers.layer_boundary.residual.batch import stream_of
-
         import torch
+        from sglang.srt.layers.layer_boundary.residual.batch import stream_of
 
         stream = stream_of(forward_batch)
         hidden, residual = stream.export(hidden)
@@ -580,5 +579,9 @@ SPEC = MonoSpec(
     model_disable_reasons=model_disable_reasons,
     config_disable_reasons=config_disable_reasons,
     build=build,
-    **({} if MONOKERNEL_API_VERSION is None else {"api_version": MONOKERNEL_API_VERSION}),
+    **(
+        {}
+        if MONOKERNEL_API_VERSION is None
+        else {"api_version": MONOKERNEL_API_VERSION}
+    ),
 )

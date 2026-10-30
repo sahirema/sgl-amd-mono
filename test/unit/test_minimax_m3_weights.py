@@ -278,7 +278,10 @@ VIEW_REFUSALS = {
         "mlp.experts.moe_runner_config",
         lambda torch, tp: types.SimpleNamespace(activation="situ"),
     ),
-    "no fused shared expert": ("mlp.experts.num_local_experts", lambda torch, tp: N_ROUTED),
+    "no fused shared expert": (
+        "mlp.experts.num_local_experts",
+        lambda torch, tp: N_ROUTED,
+    ),
     "expert parallel": ("mlp.experts.moe_ep_rank", lambda torch, tp: 1),
     "no routing bias": ("mlp.e_score_correction_bias", lambda torch, tp: None),
     # not a GemmaRMSNorm
