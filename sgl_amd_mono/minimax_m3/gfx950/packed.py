@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import inspect
 import logging
-import os
 
 import torch
+from aiter.ops.flydsl.kernels.tensor_shim import _preload_compiled, _run_compiled
 
 from sgl_amd_mono.common import guard
 from sgl_amd_mono.minimax_m3.gfx950.config import (
@@ -47,21 +47,9 @@ SGLANG_READS = {
 
 
 def compile_only(launch) -> None:
-    """Compile a launch for this process without running it (FlyDSL's compile-only
-    mode, for the one call); the first real call then only loads the code."""
-    from flydsl.utils.env import CompileEnvManager
-
+    """Build the launcher without dispatching its kernels."""
     names = [n for n in inspect.signature(launch.func).parameters if n != "stream"]
-    var = CompileEnvManager.options["compile_only"].env_var
-    old = os.environ.get(var)
-    os.environ[var] = "1"
-    try:
-        launch(*([0] * len(names)), stream=torch.cuda.current_stream())
-    finally:
-        if old is None:
-            os.environ.pop(var, None)
-        else:
-            os.environ[var] = old
+    _preload_compiled(launch, *([0] * len(names)), torch.cuda.current_stream())
 
 
 def _need(ok: bool, what: str) -> None:
@@ -448,7 +436,8 @@ class M3Kernel:
         if hidden_states.data_ptr() != ar.data_ptr():
             ar[:n].copy_(hidden_states.view(n, HIDDEN_SIZE))
         lw = p.sparse[i]
-        self.launcher(
+        _run_compiled(
+            self.launcher,
             _ptr(p.h), _ptr(p.q), _ptr(block_table), _ptr(seq_lens),
             p.k_ptrs[i], p.v_ptrs[i], _ptr(lw.k_scale), _ptr(lw.v_scale),
             _ptr(lw.w_o), _ptr(lw.s_o), _ptr(lw.g_post), _ptr(lw.gate),
@@ -459,7 +448,7 @@ class M3Kernel:
             block_table.shape[1], memo["query_len"],
             _ptr(p.k1_args[i]), _ptr(positions),
             _ptr(forward_batch.out_cache_loc), _ptr(residual.view(n, HIDDEN_SIZE)),
-            stream=torch.cuda.current_stream(),
+            torch.cuda.current_stream(),
         )  # fmt: skip
         if i == len(p.sparse) - 1:
             # Opens the next step's epoch, which is what keeps a layer's mailbox
