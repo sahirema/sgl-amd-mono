@@ -35,39 +35,87 @@ from sgl_amd_mono.minimax_m3.gfx950.layout import (
 # tp -> every extent that follows a rank's share of the heads or of INTER
 EXPECTED = {
     2: dict(
-        h=32, h_sub=16, o_k=4096, o_k_sub=2048,
-        split_passes=2, split_rows_whole=True, split_live_g4=4,
-        split_slots=512, split_slots_whole=True,
-        p8_words=2048, kv_page_bytes=4096, iscore_blocks=16384,
-        ug_per_slot=96, sh_tasks=192, wide_from=3,
-        mid_row=388, midsc_row=52, o_row=1028,
-        merge_slots=1024, merge_passes=2,
-        merge_rounds_whole=True, merge_tail_slots=512,
-        mid_copy_rounds=8, mid8_slots=960, mid8_rounds=2,
+        h=32,
+        h_sub=16,
+        o_k=4096,
+        o_k_sub=2048,
+        split_passes=2,
+        split_rows_whole=True,
+        split_live_g4=4,
+        split_slots=512,
+        split_slots_whole=True,
+        p8_words=2048,
+        kv_page_bytes=4096,
+        iscore_blocks=16384,
+        ug_per_slot=96,
+        sh_tasks=192,
+        wide_from=3,
+        mid_row=388,
+        midsc_row=52,
+        o_row=1028,
+        merge_slots=1024,
+        merge_passes=2,
+        merge_rounds_whole=True,
+        merge_tail_slots=512,
+        mid_copy_rounds=8,
+        mid8_slots=960,
+        mid8_rounds=2,
         scratch_bytes=6526720,
     ),
     4: dict(
-        h=16, h_sub=16, o_k=2048, o_k_sub=2048,
-        split_passes=1, split_rows_whole=True, split_live_g4=4,
-        split_slots=512, split_slots_whole=True,
-        p8_words=1024, kv_page_bytes=2048, iscore_blocks=8192,
-        ug_per_slot=48, sh_tasks=96, wide_from=5,
-        mid_row=196, midsc_row=28, o_row=516,
-        merge_slots=512, merge_passes=1,
-        merge_rounds_whole=True, merge_tail_slots=512,
-        mid_copy_rounds=4, mid8_slots=480, mid8_rounds=1,
+        h=16,
+        h_sub=16,
+        o_k=2048,
+        o_k_sub=2048,
+        split_passes=1,
+        split_rows_whole=True,
+        split_live_g4=4,
+        split_slots=512,
+        split_slots_whole=True,
+        p8_words=1024,
+        kv_page_bytes=2048,
+        iscore_blocks=8192,
+        ug_per_slot=48,
+        sh_tasks=96,
+        wide_from=5,
+        mid_row=196,
+        midsc_row=28,
+        o_row=516,
+        merge_slots=512,
+        merge_passes=1,
+        merge_rounds_whole=True,
+        merge_tail_slots=512,
+        mid_copy_rounds=4,
+        mid8_slots=480,
+        mid8_rounds=1,
         scratch_bytes=3758080,
     ),
     8: dict(
-        h=8, h_sub=8, o_k=1024, o_k_sub=1024,
-        split_passes=1, split_rows_whole=False, split_live_g4=2,
-        split_slots=256, split_slots_whole=False,
-        p8_words=642, kv_page_bytes=2048, iscore_blocks=8192,
-        ug_per_slot=24, sh_tasks=48, wide_from=5,
-        mid_row=100, midsc_row=16, o_row=260,
-        merge_slots=256, merge_passes=1,
-        merge_rounds_whole=False, merge_tail_slots=256,
-        mid_copy_rounds=2, mid8_slots=240, mid8_rounds=1,
+        h=8,
+        h_sub=8,
+        o_k=1024,
+        o_k_sub=1024,
+        split_passes=1,
+        split_rows_whole=False,
+        split_live_g4=2,
+        split_slots=256,
+        split_slots_whole=False,
+        p8_words=642,
+        kv_page_bytes=2048,
+        iscore_blocks=8192,
+        ug_per_slot=24,
+        sh_tasks=48,
+        wide_from=5,
+        mid_row=100,
+        midsc_row=16,
+        o_row=260,
+        merge_slots=256,
+        merge_passes=1,
+        merge_rounds_whole=False,
+        merge_tail_slots=256,
+        mid_copy_rounds=2,
+        mid8_slots=240,
+        mid8_rounds=1,
         scratch_bytes=2914560,
     ),
 }
@@ -108,9 +156,25 @@ def test_scratch_regions_are_ordered_and_disjoint(tp):
     layout = Layout(dims=Dims(tp=tp))
     scratch = layout.scratch
     assert list(scratch) == [
-        "iscore", "sp_o", "sp_m", "sp_l", "attnq", "attnq_s", "a", "xn8",
-        "xsc", "scores", "mid", "sel_long", "xn8p", "xscp", "xndone",
-        "mid8p", "midsp", "ugdone", "_bytes",
+        "iscore",
+        "sp_o",
+        "sp_m",
+        "sp_l",
+        "attnq",
+        "attnq_s",
+        "a",
+        "xn8",
+        "xsc",
+        "scores",
+        "mid",
+        "sel_long",
+        "xn8p",
+        "xscp",
+        "xndone",
+        "mid8p",
+        "midsp",
+        "ugdone",
+        "_bytes",
     ]
     offsets = [off for name, off in scratch.items() if name != "_bytes"]
     assert offsets == sorted(offsets)
@@ -160,7 +224,8 @@ def test_wide_moe_threshold_follows_inter(tp):
     layout = Layout(dims=Dims(tp=tp))
     assert layout.wide_from == (3 if tp == 2 else 5)
     assert [layout.wide_moe(s) for s in (1, 2, 3, 4, 5)] == (
-        [False, False, True, True, True] if tp == 2
+        [False, False, True, True, True]
+        if tp == 2
         else [False, False, False, False, True]
     )
 
@@ -171,11 +236,14 @@ def test_pool_words_at_the_narrow_wide_seam(tp):
     sizing it from HIDDEN put TP2's mid tail outside the declared array."""
     layout = Layout(dims=Dims(tp=tp))
     got = [layout.pool_words(s) for s in (1, 2, 3, 4, 5, 16)]
-    assert got == {
-        2: [6000, 12000, 16384, 16384, 16384, 35640],
-        4: [3072, 6144, 9216, 12288, 16384, 31872],
-        8: [3072, 6144, 9216, 12288, 11368, 31872],
-    }[tp]
+    assert (
+        got
+        == {
+            2: [6000, 12000, 16384, 16384, 16384, 35640],
+            4: [3072, 6144, 9216, 12288, 16384, 31872],
+            8: [3072, 6144, 9216, 12288, 11368, 31872],
+        }[tp]
+    )
 
 
 @pytest.mark.parametrize("tp", TP_SIZES)
@@ -185,7 +253,12 @@ def test_stage_bases_place_the_later_stages_past_the_split_ctas(tp):
     layout = Layout(dims=Dims(tp=tp))
     bases = layout.stage_bases(4)
     assert bases == {
-        "split": 0, "merge": 32, "o": 36, "router": 228, "ug": 0, "down": 32,
+        "split": 0,
+        "merge": 32,
+        "o": 36,
+        "router": 228,
+        "ug": 0,
+        "down": 32,
         "shared": {2: 36, 4: 132, 8: 180}[tp],
     }
     assert bases["merge"] == N_SPLIT * 4
@@ -195,7 +268,12 @@ def test_stage_bases_place_the_later_stages_past_the_split_ctas(tp):
 def test_ug_ctas_per_token_only_splits_a_dividing_width():
     """Round-robin (None) for S < 4 or a width that does not divide the grid."""
     assert [ug_ctas_per_token(s) for s in (1, 2, 3, 4, 8, 16)] == [
-        None, None, None, 64, 32, 16,
+        None,
+        None,
+        None,
+        64,
+        32,
+        16,
     ]
 
 
@@ -265,16 +343,11 @@ def test_narrow_opart_holds_every_reachable_width(tp):
             #   wave * O_K_SUB + (g4 * 4 + e) * HEAD_DIM + 16 * jd + l16,
             #   with (g4 * 4 + e) held under h_sub by the SPLIT_LIVE_G4 guard
             "attention PV store": (
-                (waves - 1) * layout.o_k_sub
-                + (h_sub - 1) * HEAD_DIM
-                + HEAD_DIM
-                - 1
+                (waves - 1) * layout.o_k_sub + (h_sub - 1) * HEAD_DIM + HEAD_DIM - 1
             ),
             # post_attn.py:1231-1233, guarded to tid < SPLIT_SLOTS so the
             # four-per-thread walk covers exactly o_k_sub elements
-            "attention PV reduce": (
-                (waves - 1) * layout.o_k_sub + layout.o_k_sub - 1
-            ),
+            "attention PV reduce": ((waves - 1) * layout.o_k_sub + layout.o_k_sub - 1),
             # post_attn.py:2849
             #   ((k + 1) * WAVES * 64 + wave * 64 + lane) * 4 + 3,
             #   k running 0..tokens-1

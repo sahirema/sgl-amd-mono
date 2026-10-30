@@ -192,9 +192,7 @@ class Dims(msgspec.Struct, frozen=True):
         ``local_q_heads`` q heads, ``local_kv_heads`` k and v heads,
         ``idx_heads`` index q heads (the rank's own, or every one under indexer
         context parallelism) and the one replicated index k head."""
-        return (
-            self.local_q_heads + 2 * self.local_kv_heads + 1 + idx_heads
-        ) * HEAD_DIM
+        return (self.local_q_heads + 2 * self.local_kv_heads + 1 + idx_heads) * HEAD_DIM
 
     @property
     def max_qkv_rows(self) -> int:
@@ -279,9 +277,7 @@ class Dims(msgspec.Struct, frozen=True):
         try:
             want = int(raw)
         except ValueError:
-            raise ValueError(
-                f"{_MIN_WIDTH_ENV}={raw!r} is not an integer"
-            ) from None
+            raise ValueError(f"{_MIN_WIDTH_ENV}={raw!r} is not an integer") from None
         if not 1 <= want <= high:
             raise ValueError(
                 f"{_MIN_WIDTH_ENV}={want} is outside 1..{high}, the widths TP "
