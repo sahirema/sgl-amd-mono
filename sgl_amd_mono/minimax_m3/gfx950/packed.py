@@ -19,12 +19,14 @@ from aiter.ops.flydsl.kernels.tensor_shim import _preload_compiled, _run_compile
 from sgl_amd_mono.common import guard
 from sgl_amd_mono.minimax_m3.gfx950.config import (
     HEAD_DIM,
+)
+from sgl_amd_mono.minimax_m3.gfx950.config import HIDDEN as HIDDEN_SIZE
+from sgl_amd_mono.minimax_m3.gfx950.config import (
     MAX_INDEX_BLOCKS,
     MAX_TOKENS,
     SPARSE_BLOCK,
     Dims,
 )
-from sgl_amd_mono.minimax_m3.gfx950.config import HIDDEN as HIDDEN_SIZE
 
 logger = logging.getLogger(__name__)
 

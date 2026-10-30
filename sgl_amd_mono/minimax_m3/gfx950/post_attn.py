@@ -480,7 +480,8 @@ def build_post_attn_kernel(
 
             def acquire():
                 fx.memory_fence(
-                    syncscope=rocdl.SyncScope.Workgroup, ordering=fx.AtomicOrdering.Acquire
+                    syncscope=rocdl.SyncScope.Workgroup,
+                    ordering=fx.AtomicOrdering.Acquire,
                 )
 
             def scores_copy(c, k=0):
@@ -511,7 +512,9 @@ def build_post_attn_kernel(
             AG_RS = tokens >= AG_RS_FROM
 
             def peer_addr(w):
-                pw = fx.Vector(bo.buffer_load(rsrc(peers), w * 2, vec_width=2, dtype=T.i32))
+                pw = fx.Vector(
+                    bo.buffer_load(rsrc(peers), w * 2, vec_width=2, dtype=T.i32)
+                )
                 return (fx.Int64(uniform(pw[1])) << 32) | fx.Int64(
                     fx.Uint32(uniform(pw[0]))
                 )
@@ -521,14 +524,18 @@ def build_post_attn_kernel(
 
             def ld_bf16x4(r, k, cm=0):
                 w = fx.Vector(
-                    bo.buffer_load(r, k // 2, vec_width=2, dtype=T.i32, cache_modifier=cm)
+                    bo.buffer_load(
+                        r, k // 2, vec_width=2, dtype=T.i32, cache_modifier=cm
+                    )
                 )
                 v = w.bitcast(fx.BFloat16).to(fx.Float32)
                 return [v[j] for j in range(4)]
 
             def mfma_fp8(a64, b64, c):
                 return fx.Vector(
-                    rocdl.mfma_f32_16x16x32_fp8_fp8(T.vec(4, T.f32), [a64, b64, c, 0, 0, 0])
+                    rocdl.mfma_f32_16x16x32_fp8_fp8(
+                        T.vec(4, T.f32), [a64, b64, c, 0, 0, 0]
+                    )
                 )
 
             def block_max(v):
@@ -548,7 +555,10 @@ def build_post_attn_kernel(
                             (rank * MAX_TOKENS + i // half) * HIDDEN
                             + row0
                             + (i % half) * 2,
-                            [fx.ptr_load(misc + i * 2), fx.ptr_load(misc + (i * 2 + 1))],
+                            [
+                                fx.ptr_load(misc + i * 2),
+                                fx.ptr_load(misc + (i * 2 + 1)),
+                            ],
                         )
 
             # this layer's K1 first: its GEMV / head / norm tasks and the scores
@@ -556,7 +566,9 @@ def build_post_attn_kernel(
                 v = fx.Vector(
                     bo.buffer_load(rsrc(k1_args), 2 * i, vec_width=2, dtype=T.i32)
                 )
-                return (fx.Int64(uniform(v[1])) << 32) | fx.Int64(fx.Uint32(uniform(v[0])))
+                return (fx.Int64(uniform(v[1])) << 32) | fx.Int64(
+                    fx.Uint32(uniform(v[0]))
+                )
 
             (
                 ar_in, g_in, w_qkv, s_qkv, g_q, g_k, g_iq, g_ik, cos_sin, index_cache,
@@ -613,7 +625,9 @@ def build_post_attn_kernel(
                 bits = sc.bitcast(fx.Int32)
                 bits = (bits == fx.Int32(-(2**31))).select(fx.Int32(0), bits)
                 key = (bits < 0).select(bits ^ 0x7FFFFFFF, bits)
-                return ((bits & 0x7FFFFFFF) > 0x7F800000).select(fx.Int32(-(2**31)), key)
+                return ((bits & 0x7FFFFFFF) > 0x7F800000).select(
+                    fx.Int32(-(2**31)), key
+                )
 
             def rank_in_cta(entries, m, ents):
                 """Counts of the CTA's ``m`` entries that beat each of this thread's
@@ -754,10 +768,14 @@ def build_post_attn_kernel(
                 if tid == 0:
                     fx.ptr_store(fx.Int32(0), blk + 17)
                 if const_expr(ih_cp):
-                    own0 = init_blocks + (ih_own - init_blocks) % TP  # this rank's first
+                    own0 = (
+                        init_blocks + (ih_own - init_blocks) % TP
+                    )  # this rank's first
                     n_own = (n_blk - own0 + TP - 1) // TP
                     # the last scored one: the local blocks' slots hold no score
-                    last = own0 + TP * ((n_blk - local_blocks - own0 + TP - 1) // TP - 1)
+                    last = own0 + TP * (
+                        (n_blk - local_blocks - own0 + TP - 1) // TP - 1
+                    )
                     span = (n_own + 1) // 2
                     lo = (part % 2) * span
                     hi = fx.min(lo + span, n_own)
@@ -806,13 +824,22 @@ def build_post_attn_kernel(
                 cl = fx.ptr_load(keys + 2 * fx.min(tid, n_c - 1))
                 ch = fx.ptr_load(keys + (2 * fx.min(tid, n_c - 1) + 1))
                 page = fx.Int32(
-                    bo.buffer_load(rsrc(bt_row(k)), fx.max(cl, 0), vec_width=1, dtype=T.i32)
+                    bo.buffer_load(
+                        rsrc(bt_row(k)), fx.max(cl, 0), vec_width=1, dtype=T.i32
+                    )
                 )
                 (cnt,) = count_beaten(keys, [(fx.Int64(ch) << 32) | fx.Int64(cl)], n_c)
                 # the tail block is a local one: its key is forced
                 kt = index_key(n_blk - 1, fx.Int32(0), n_blk)
                 sel, slot, n_ctx = place(
-                    ch, cl, cnt, held, kt, n_blk, pick(seq_lens_k, k), pick(long_rows, k)
+                    ch,
+                    cl,
+                    cnt,
+                    held,
+                    kt,
+                    n_blk,
+                    pick(seq_lens_k, k),
+                    pick(long_rows, k),
                 )
                 if sel & (slot // 2 == part):
                     for j in range_constexpr(PAGES_PER_BLOCK):
@@ -1011,7 +1038,9 @@ def build_post_attn_kernel(
                     # drops their C rows at every store. Both are the identity when
                     # the rows come out whole, so TP4 and TP2 emit the original code.
                     def a_row(r):
-                        return r if const_expr(SPLIT_ROWS_WHOLE) else fx.min(r, H_SUB - 1)
+                        return (
+                            r if const_expr(SPLIT_ROWS_WHOLE) else fx.min(r, H_SUB - 1)
+                        )
 
                     def live_row(r, cond):
                         """``cond`` and-ed with "MFMA row ``r`` is a real q head"."""
@@ -1070,7 +1099,9 @@ def build_post_attn_kernel(
                         )
                         vmax_w = wave_max(vloc)
                         for e in range_constexpr(4):
-                            mh = butterfly(fx.max(sc[0][e], sc[1][e]), (8, 4, 2, 1), fx.max)
+                            mh = butterfly(
+                                fx.max(sc[0][e], sc[1][e]), (8, 4, 2, 1), fx.max
+                            )
                             # a surplus row's max would land in wave + 1's slots
                             if live_row(g4 * 4 + e, l16 == 0):
                                 fx.ptr_store(mh, hst + (wave * H + h0 + g4 * 4 + e))
@@ -1104,7 +1135,10 @@ def build_post_attn_kernel(
                                 ls = ls + pj
                                 b8 = (
                                     fp8_pack4(
-                                        (valid[j].select(vss[j], fx.Float32(0.0)) * fscale)
+                                        (
+                                            valid[j].select(vss[j], fx.Float32(0.0))
+                                            * fscale
+                                        )
                                         * pj,
                                         0.0,
                                         0.0,
@@ -1179,13 +1213,17 @@ def build_post_attn_kernel(
                             head = h0 + e0 // HEAD_DIM
                             lsum = fx.ptr_load(hst + (WAVES * H + head))
                             for w in range_constexpr(1, WAVES):
-                                lsum = lsum + fx.ptr_load(hst + (WAVES * H + w * H + head))
+                                lsum = lsum + fx.ptr_load(
+                                    hst + (WAVES * H + w * H + head)
+                                )
                             inv_l = 1.0 / (lsum > 0.0).select(lsum, fx.Float32(1.0))
                             ov = []
                             for k in range_constexpr(4):
                                 acc = fx.ptr_load(opart + (e0 + k))
                                 for w in range_constexpr(1, WAVES):
-                                    acc = acc + fx.ptr_load(opart + (w * O_K_SUB + e0 + k))
+                                    acc = acc + fx.ptr_load(
+                                        opart + (w * O_K_SUB + e0 + k)
+                                    )
                                 ov.append((pscale * acc) * inv_l)
                             mb_put_bf(mba("sp_o"), ts * O_K + p * O_K_SUB + e0, ov)
 
@@ -1280,11 +1318,15 @@ def build_post_attn_kernel(
                     mls = got[: 2 * N_SPLIT]
                     ovs = got[2 * N_SPLIT :]
                     m_i = [mls[i][0].bitcast(fx.Float32) for i in range(N_SPLIT)]
-                    l_i = [mls[N_SPLIT + i][0].bitcast(fx.Float32) for i in range(N_SPLIT)]
+                    l_i = [
+                        mls[N_SPLIT + i][0].bitcast(fx.Float32) for i in range(N_SPLIT)
+                    ]
                     gm = m_i[0]
                     for i in range_constexpr(1, N_SPLIT):
                         gm = fx.max(gm, m_i[i])
-                    sl = [l_i[i] * hw_exp2((m_i[i] - gm) * LOG2E) for i in range(N_SPLIT)]
+                    sl = [
+                        l_i[i] * hw_exp2((m_i[i] - gm) * LOG2E) for i in range(N_SPLIT)
+                    ]
                     gs = sl[0]
                     for i in range_constexpr(1, N_SPLIT):
                         gs = gs + sl[i]
@@ -1371,7 +1413,8 @@ def build_post_attn_kernel(
                             fx.Vector(
                                 bo.buffer_load(
                                     r_wo,
-                                    ((rg * (O_K // 32) + kc * 2) * 512 + lane * 16) // 4,
+                                    ((rg * (O_K // 32) + kc * 2) * 512 + lane * 16)
+                                    // 4,
                                     vec_width=4,
                                     dtype=T.i32,
                                 )
@@ -1380,7 +1423,10 @@ def build_post_attn_kernel(
                     # this task's row scales, before the wait
                     ws = fx.Float32(
                         bo.buffer_load(
-                            rsrc(s_o), t * O_ROWS + tid % O_ROWS, vec_width=1, dtype=T.f32
+                            rsrc(s_o),
+                            t * O_ROWS + tid % O_ROWS,
+                            vec_width=1,
+                            dtype=T.f32,
                         )
                     )
 
@@ -1404,7 +1450,9 @@ def build_post_attn_kernel(
                         # the merge tasks' fp8 inputs: every token's scale (published
                         # after its plain words), then the words, 16 B a load
                         got = mb_poll([(mba("attnq_s"), k, 1) for k in range(tokens)])
-                        x_scales = [got[k][0].bitcast(fx.Float32) for k in range(tokens)]
+                        x_scales = [
+                            got[k][0].bitcast(fx.Float32) for k in range(tokens)
+                        ]
                         acquire()
                         n_v = tokens * O_K // 16
                         for i in range_constexpr((n_v + THREADS - 1) // THREADS):
@@ -1420,7 +1468,10 @@ def build_post_attn_kernel(
                                             cache_modifier=CM_DEV,
                                         )
                                     ),
-                                    xs + (v * 4 // (O_K // 4) * O_ROW + v * 4 % (O_K // 4)),
+                                    xs
+                                    + (
+                                        v * 4 // (O_K // 4) * O_ROW + v * 4 % (O_K // 4)
+                                    ),
                                 )
                     gpu.barrier()
                     # B column l16 = token l16 (clamped), so the weight stream is the same at any S
@@ -1476,9 +1527,14 @@ def build_post_attn_kernel(
                         for w in range_constexpr(4):
                             tot = tot + fx.ptr_load(
                                 red
-                                + (((grp * 4 + w) * 64 + 16 * (rr // 4) + tk) * 4 + rr % 4)
+                                + (
+                                    ((grp * 4 + w) * 64 + 16 * (rr // 4) + tk) * 4
+                                    + rr % 4
+                                )
                             )
-                        fx.ptr_store(bf16_round(tot * pick(x_scales, tk) * ws), misc + tid)
+                        fx.ptr_store(
+                            bf16_round(tot * pick(x_scales, tk) * ws), misc + tid
+                        )
                     gpu.barrier()
                     # with AG_RS only to the row group's owner rank
                     push_rows("attn", t * O_ROWS, O_ROWS, t % W if AG_RS else None)
@@ -1491,7 +1547,11 @@ def build_post_attn_kernel(
                             own = sy(sym, "attn")
                             prt = mb_poll(
                                 [
-                                    (own, ((src * MAX_TOKENS + ptk) * HIDDEN + row) // 2, 1)
+                                    (
+                                        own,
+                                        ((src * MAX_TOKENS + ptk) * HIDDEN + row) // 2,
+                                        1,
+                                    )
                                     for src in range(W)
                                 ],
                             )
@@ -1527,7 +1587,11 @@ def build_post_attn_kernel(
                             own = sy(sym, "attn")
                             prt = mb_poll(
                                 [
-                                    (own, ((src * MAX_TOKENS + ptk) * HIDDEN + row) // 2, 1)
+                                    (
+                                        own,
+                                        ((src * MAX_TOKENS + ptk) * HIDDEN + row) // 2,
+                                        1,
+                                    )
                                     for src in range(W)
                                 ],
                             )
@@ -1627,7 +1691,9 @@ def build_post_attn_kernel(
                 return e, hw_rcp((e << 23).bitcast(fx.Float32))
 
             def mx8_q(v, inv):
-                return fx.max(fx.min(v * inv, fx.Float32(FP8_MAX)), fx.Float32(-FP8_MAX))
+                return fx.max(
+                    fx.min(v * inv, fx.Float32(FP8_MAX)), fx.Float32(-FP8_MAX)
+                )
 
             def lds_b8(chunk_word):
                 """This lane's B operand of the 128-k chunk at LDS word ``chunk_word``:
@@ -1635,7 +1701,9 @@ def build_post_attn_kernel(
                 f8f6f4 MFMA's B layout."""
                 h = [
                     fx.Vector(
-                        fx.ptr_load(xs + (chunk_word + 16 * j + 4 * g4), result_type=v4f)
+                        fx.ptr_load(
+                            xs + (chunk_word + 16 * j + 4 * g4), result_type=v4f
+                        )
                     ).bitcast(fx.Int32)
                     for j in range(2)
                 ]
@@ -1671,7 +1739,9 @@ def build_post_attn_kernel(
 
                 def ld_bf16x12(r, word, cm=0):
                     a8 = fx.Vector(
-                        bo.buffer_load(r, word, vec_width=4, dtype=T.i32, cache_modifier=cm)
+                        bo.buffer_load(
+                            r, word, vec_width=4, dtype=T.i32, cache_modifier=cm
+                        )
                     ).bitcast(fx.BFloat16)
                     a4 = fx.Vector(
                         bo.buffer_load(
@@ -1766,7 +1836,9 @@ def build_post_attn_kernel(
                         f = [
                             v
                             for j in range(2)
-                            for v in bf2_f32(fx.ptr_load(xs + (w0 + j)).bitcast(fx.Int32))
+                            for v in bf2_f32(
+                                fx.ptr_load(xs + (w0 + j)).bitcast(fx.Int32)
+                            )
                         ]
                         e, inv = mx8_scale(f, (1, 2, 4))
                         word = fp8_pack4(*[mx8_q(v, inv) for v in f])
@@ -1802,7 +1874,9 @@ def build_post_attn_kernel(
                                     clamp=False,
                                 ).result
                             )
-                    logit = bf16_round(wave_sum((accs[0] + accs[1]) + (accs[2] + accs[3])))
+                    logit = bf16_round(
+                        wave_sum((accs[0] + accs[1]) + (accs[2] + accs[3]))
+                    )
                     # the routing key and sigmoid go out, not the logit: the consumers'
                     # routing starts at the max rounds
                     sc = hw_rcp(1.0 + hw_exp2(-logit * LOG2E))
@@ -1859,7 +1933,9 @@ def build_post_attn_kernel(
                 # the bound keeps a corrupt route from addressing past the expert table
                 e_u = shared.select(
                     fx.Int32(SHARED_EXPERT),
-                    fx.min(uniform(fx.ptr_load(route + (8 * tk + slot))), SHARED_EXPERT),
+                    fx.min(
+                        uniform(fx.ptr_load(route + (8 * tk + slot))), SHARED_EXPERT
+                    ),
                 )
                 r_w = rsrc(w13 + fx.Int64(e_u) * W13_BYTES)
                 r_s = rsrc(s13)
@@ -1875,7 +1951,8 @@ def build_post_attn_kernel(
                             fx.Vector(
                                 bo.buffer_load(
                                     r_w,
-                                    ((rg * (HIDDEN // 64) + kc * 2) * 512 + lane * 16) // 4,
+                                    ((rg * (HIDDEN // 64) + kc * 2) * 512 + lane * 16)
+                                    // 4,
                                     vec_width=4,
                                     dtype=T.i32,
                                 )
@@ -2018,7 +2095,9 @@ def build_post_attn_kernel(
                     jj = fx.min(j, DN_UNITS - 1)
                     sl = jj // DN_KC
                     kc = jj % DN_KC
-                    e_d = fx.min(uniform(fx.ptr_load(route + (8 * k + sl))), SHARED_EXPERT)
+                    e_d = fx.min(
+                        uniform(fx.ptr_load(route + (8 * k + sl))), SHARED_EXPERT
+                    )
                     wv = fx.Vector(
                         bo.buffer_load(
                             rsrc(w2 + fx.Int64(e_d) * W2_BYTES, dn_bytes),
@@ -2056,7 +2135,9 @@ def build_post_attn_kernel(
                     )
                     sc = e8m0_load(
                         rsrc(s2, dn_scale_bytes),
-                        group_scale_byte(SHARED_EXPERT, HIDDEN, rg_d, kc, W2_SCALE_COLS),
+                        group_scale_byte(
+                            SHARED_EXPERT, HIDDEN, rg_d, kc, W2_SCALE_COLS
+                        ),
                     )
                     wgt = (j < DN_KC).select(fx.Float32(shared_weight), fx.Float32(0.0))
                     units.append((wv, sc, kc, wgt))
@@ -2084,7 +2165,8 @@ def build_post_attn_kernel(
                                 [
                                     (
                                         own,
-                                        ((src * MAX_TOKENS + row_tok) * HIDDEN + row) // 2,
+                                        ((src * MAX_TOKENS + row_tok) * HIDDEN + row)
+                                        // 2,
                                         1,
                                     )
                                     for src in range(W)
@@ -2138,7 +2220,9 @@ def build_post_attn_kernel(
             W_MIDSC = (MID_ROWS + 1) * MID_ROW
             # up / gate tasks go in pairs, a CTA runs both: an MXFP8 block is 32 rows
             UG_PAIRS = UG_PER_SLOT // 2
-            UGW_ITERS = 2 * ((U_MAX * UG_PAIRS + G - 1) // G)  # up / gate tasks a CTA runs
+            UGW_ITERS = 2 * (
+                (U_MAX * UG_PAIRS + G - 1) // G
+            )  # up / gate tasks a CTA runs
             DN_WITERS = (U_MAX * DN_KC + 3) // 4  # (expert, chunk) units a wave runs
             DN_DEPTH = 12  # units whose weights are in flight
             ROUTE_ITERS = (tokens + WAVES - 1) // WAVES  # tokens a wave routes
@@ -2206,7 +2290,8 @@ def build_post_attn_kernel(
                             fx.Vector(
                                 bo.buffer_load(
                                     r_w,
-                                    ((rg * (HIDDEN // 64) + kc * 2) * 512 + lane * 16) // 4,
+                                    ((rg * (HIDDEN // 64) + kc * 2) * 512 + lane * 16)
+                                    // 4,
                                     vec_width=4,
                                     dtype=T.i32,
                                 )
@@ -2323,10 +2408,13 @@ def build_post_attn_kernel(
                         xs_ = slot_of(xt, xe)
                         xh = (((xm >> xk) & 1) != 0) & (xu <= nu)
                         fx.ptr_store(
-                            xh.select(xt * MOE_SLOTS + xs_, fx.Int32(MID_ROWS)), urow + ix
+                            xh.select(xt * MOE_SLOTS + xs_, fx.Int32(MID_ROWS)),
+                            urow + ix,
                         )
                         fx.ptr_store(
-                            xh.select(fx.ptr_load(rwt + (8 * xt + xs_)), fx.Float32(0.0)),
+                            xh.select(
+                                fx.ptr_load(rwt + (8 * xt + xs_)), fx.Float32(0.0)
+                            ),
                             uwt + ix,
                         )
 
@@ -2354,7 +2442,9 @@ def build_post_attn_kernel(
                 for j in range_constexpr(ROUTE_ITERS):
                     if wave + WAVES * j < tokens:
                         tk_seq = uniform(
-                            bo.buffer_load(r_seq, wave_toks[j], vec_width=1, dtype=T.i32)
+                            bo.buffer_load(
+                                r_seq, wave_toks[j], vec_width=1, dtype=T.i32
+                            )
                         )
                         route_top4(
                             wave_toks[j],
@@ -2364,7 +2454,9 @@ def build_post_attn_kernel(
                             sg[2 * j + 1][1].bitcast(fx.Float32),
                             fpool + W_SIG,
                             wave_mask,
-                            (tk_seq > 0).select(fx.Int32(1) << wave_toks[j], fx.Int32(0)),
+                            (tk_seq > 0).select(
+                                fx.Int32(1) << wave_toks[j], fx.Int32(0)
+                            ),
                         )
                 gpu.barrier()
                 build_experts()
@@ -2420,7 +2512,9 @@ def build_post_attn_kernel(
                     if const_expr(it % 2 == 0):
                         pair_scs = cur[1]
                     if has_t:
-                        y = wug_y(cur[0], pair_scs, it % 2)  # a pair: row groups cg, cg + 1
+                        y = wug_y(
+                            cur[0], pair_scs, it % 2
+                        )  # a pair: row groups cg, cg + 1
                         if const_expr(it % 2 == 0):
                             y_lo = y
                         else:
@@ -2508,7 +2602,9 @@ def build_post_attn_kernel(
                 if tid < MID_ROW_WORDS:
                     fx.ptr_store(fx.Int32(0), xs + (MID_ROWS * MID_ROW + tid))
                 if tid < MIDSC_ROW_WORDS:
-                    fx.ptr_store(fx.Int32(0), xs + (W_MIDSC + MID_ROWS * MIDSC_ROW + tid))
+                    fx.ptr_store(
+                        fx.Int32(0), xs + (W_MIDSC + MID_ROWS * MIDSC_ROW + tid)
+                    )
                 gpu.barrier()
                 for i in range_constexpr(DN_WITERS):
                     if const_expr(i == 0):  # the tables are in: the early units' rows
@@ -2525,7 +2621,8 @@ def build_post_attn_kernel(
                     )
                     # a unit past the last adds nothing, whatever its MFMA gave
                     acc = [
-                        acc[e] + ok.select(dcu[e] * dw, fx.Float32(0.0)) for e in range(4)
+                        acc[e] + ok.select(dcu[e] * dw, fx.Float32(0.0))
+                        for e in range(4)
                     ]
                 a0, a1, a2, a3 = acc
                 fx.ptr_store(
@@ -2540,7 +2637,8 @@ def build_post_attn_kernel(
                     tot = fx.Float32(0.0)
                     for w in range_constexpr(4):
                         tot = tot + fx.ptr_load(
-                            red + (((grp * 4 + w) * 64 + 16 * (rr // 4) + k) * 4 + rr % 4)
+                            red
+                            + (((grp * 4 + w) * 64 + 16 * (rr // 4) + k) * 4 + rr % 4)
                         )
                     fx.ptr_store(bf16_round(tot), misc + tid)
                 gpu.barrier()
@@ -2570,7 +2668,9 @@ def build_post_attn_kernel(
                     0 first polls the last word of each router task's slice: every
                     thread of every CTA spinning on the whole of it holds the
                     shared-expert CTAs' xn back."""
-                    gate_tok = fx.min(lane // N_ROUTER, tokens - 1) if tok is None else tok
+                    gate_tok = (
+                        fx.min(lane // N_ROUTER, tokens - 1) if tok is None else tok
+                    )
                     if wave == 0:
                         mb_poll(
                             [
@@ -2628,7 +2728,9 @@ def build_post_attn_kernel(
                     gpu.barrier()
                     cur = ug_load(ug_task_id(0)[0])
                     if const_expr(sh_late):  # noqa: SIM102
-                        if has_sh:  # while the first routed task's weights are in flight
+                        if (
+                            has_sh
+                        ):  # while the first routed task's weights are in flight
                             sh_compute(sh_j, sh_w[0], sh_w[1])
                     # task i + 1's weights go out before task i's GEMV; a spare load is clamped
                     for it in range_constexpr(UG_ITERS):
@@ -2660,7 +2762,9 @@ def build_post_attn_kernel(
                             (
                                 mba("mid"),
                                 k * MOE_SLOTS * INTER
-                                + fx.min(tid * 2 + i * 2 * THREADS, MOE_SLOTS * INTER - 2),
+                                + fx.min(
+                                    tid * 2 + i * 2 * THREADS, MOE_SLOTS * INTER - 2
+                                ),
                                 2,
                             )
                             for i in range(MID_COPY_ROUNDS)
@@ -2732,7 +2836,8 @@ def build_post_attn_kernel(
                     )
                     sh = [sh[j4] + cu[j4] * wgt for j4 in range(4)]
                 fx.ptr_store(
-                    fx.Vector.from_elements(sh, fx.Float32), opart + (wave * 64 + lane) * 4
+                    fx.Vector.from_elements(sh, fx.Float32),
+                    opart + (wave * 64 + lane) * 4,
                 )
                 # all tokens' GEMVs first, partials past the shared ones: one barrier, one reduce
                 for k in range_constexpr(tokens):
@@ -2770,14 +2875,19 @@ def build_post_attn_kernel(
                         tot = tot + fx.ptr_load(
                             opart
                             + (
-                                ((k + 1) * WAVES * 64 + (grp * 4 + w) * 64 + 16 * (rr // 4))
+                                (
+                                    (k + 1) * WAVES * 64
+                                    + (grp * 4 + w) * 64
+                                    + 16 * (rr // 4)
+                                )
                                 * 4
                                 + rr % 4
                             )
                         )
                     for w in range_constexpr(4):
                         tot = tot + fx.ptr_load(
-                            opart + (((grp * 4 + w) * 64 + 16 * (rr // 4) + k) * 4 + rr % 4)
+                            opart
+                            + (((grp * 4 + w) * 64 + 16 * (rr // 4) + k) * 4 + rr % 4)
                         )
                     fx.ptr_store(bf16_round(tot), misc + tid)
                 gpu.barrier()
