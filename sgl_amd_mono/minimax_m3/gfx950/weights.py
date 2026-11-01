@@ -241,11 +241,19 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
             getattr(w13, "is_shuffled", False) and getattr(w2, "is_shuffled", False),
             f"layer {layer_id}: expert weights are not AITER-shuffled MXFP4",
         )
+        # aiter's e8m0_shuffle pads a narrow MXFP4 expert's column count up to a
+        # multiple of 8 scale-blocks (32 columns each) -- at TP8, inter=384 is
+        # 12 scale-blocks, padded to 16, so the ACTUAL stored width is
+        # dims.padded_scale_cols * 32 (512), not dims.inter (384). TP2 (48) and
+        # TP4 (24) are already multiples of 8, so they never pad and this is a
+        # no-op there. This affects w13 and w2's raw weight storage the same
+        # way it affects their scale storage below, so both checks are written
+        # against the padded width, not dims.inter.
         _need(
             w13.dtype == torch.uint8
             and w2.dtype == torch.uint8
-            and w13.numel() == E * 2 * dims.inter * HIDDEN // 2
-            and w2.numel() == E * HIDDEN * dims.inter // 2,
+            and w13.numel() == E * 2 * dims.padded_scale_cols * 32 * HIDDEN // 2
+            and w2.numel() == E * HIDDEN * dims.padded_scale_cols * 32 // 2,
             f"layer {layer_id}: expert weight {w13.dtype} {tuple(w13.shape)} / "
             f"{w2.dtype} {tuple(w2.shape)}",
         )
@@ -255,15 +263,17 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
         # which pads the column count up to a multiple of 8 -- so the stored
         # tensor is ``dims.padded_scale_cols`` wide, not ``dims.scale_cols``.
         # The two agree at TP4 (24) and TP2 (48) and differ at TP8, where 12
-        # columns are stored as 16. w13's scale is HIDDEN // 32 = 192 wide and
-        # never pads.
+        # columns are stored as 16. w13's scale is HIDDEN // 32 = 192 wide in
+        # that axis and never pads -- but its OTHER axis (2*inter rows) pads
+        # exactly like the raw weight above, for the same reason.
         _need(
             s13.dtype == torch.uint8
             and s2.dtype == torch.uint8
-            and s13.numel() == E * 2 * dims.inter * HIDDEN // 32
+            and s13.numel() == E * 2 * dims.padded_scale_cols * 32 * HIDDEN // 32
             and s2.numel() == E * HIDDEN * dims.padded_scale_cols,
             f"layer {layer_id}: expert scales {s13.dtype} {s13.numel()} / "
-            f"{s2.dtype} {s2.numel()}, want {E * 2 * dims.inter * HIDDEN // 32} / "
+            f"{s2.dtype} {s2.numel()}, want "
+            f"{E * 2 * dims.padded_scale_cols * 32 * HIDDEN // 32} / "
             f"{E * HIDDEN * dims.padded_scale_cols}",
         )
 
