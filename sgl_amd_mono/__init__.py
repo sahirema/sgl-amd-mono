@@ -68,7 +68,19 @@ def register_specs() -> None:
     # does not by itself protect against.
     takes_model_type = "model_type" in inspect.signature(register).parameters
 
+    seen_architectures = set()
     for (architecture, model_type), path in SPECS.items():
+        if not takes_model_type:
+            # The old registry is a flat architecture -> path map with no
+            # model_type axis at all, so an architecture that needs model_type
+            # to disambiguate (DeepSeek-V4 vs V4.1 share one architecture
+            # string) can only keep one spec here -- the first one in SPECS
+            # wins; the rest are simply unavailable under old SGLang, same as
+            # they always were before this plugin grew model_type-scoped
+            # specs.
+            if architecture in seen_architectures:
+                continue
+            seen_architectures.add(architecture)
         kwargs = dict(backend=BACKEND, architecture=architecture, path=path)
         if takes_model_type:
             kwargs["model_type"] = model_type
