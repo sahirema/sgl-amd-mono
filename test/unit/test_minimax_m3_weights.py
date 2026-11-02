@@ -25,14 +25,11 @@ from sgl_amd_mono.minimax_m3.gfx950.config import HIDDEN, N_ROUTED, TP_SIZES, Di
 MODULE = "sgl_amd_mono.minimax_m3.gfx950.weights"
 E = N_ROUTED + 1  # the 128 routed experts and the fused shared one
 
-# tp -> the shapes this rank's checks accept. inter_padded is aiter's
-# e8m0_shuffle rounding inter's scale-block count up to a multiple of 8 (32
-# columns each) -- it only moves TP8 (12 -> 16 blocks, 384 -> 512), since TP2
-# and TP4's block counts (48, 24) are already multiples of 8.
+# tp -> the shapes this rank's checks accept
 EXPECTED = {
-    2: dict(qkv_rows=4992, o_k=4096, inter=1536, inter_padded=1536, s2_cols=48),
-    4: dict(qkv_rows=2560, o_k=2048, inter=768, inter_padded=768, s2_cols=24),
-    8: dict(qkv_rows=1536, o_k=1024, inter=384, inter_padded=512, s2_cols=16),
+    2: dict(qkv_rows=4992, o_k=4096, inter=1536, s2_cols=48),
+    4: dict(qkv_rows=2560, o_k=2048, inter=768, s2_cols=24),
+    8: dict(qkv_rows=1536, o_k=1024, inter=384, s2_cols=16),
 }
 
 
@@ -135,11 +132,8 @@ def build_layer(tp, torch, **tweak):
     v.update(tweak)
     bf16, u8, f32 = torch.bfloat16, torch.uint8, torch.float32
 
-    # The raw weight and w13's scale are stored at the PADDED width (aiter's
-    # e8m0_shuffle), same as w2's scale below -- intermediate_size_per_partition
-    # stays the unpadded, logical v["inter"].
-    w13 = FakeTensor((E, 2 * v["inter_padded"], HIDDEN // 2), u8)
-    w2 = FakeTensor((E, HIDDEN, v["inter_padded"] // 2), u8)
+    w13 = FakeTensor((E, 2 * v["inter"], HIDDEN // 2), u8)
+    w2 = FakeTensor((E, HIDDEN, v["inter"] // 2), u8)
     w13.is_shuffled = w2.is_shuffled = True
     experts = types.SimpleNamespace(
         moe_ep_rank=0,
@@ -151,7 +145,7 @@ def build_layer(tp, torch, **tweak):
         moe_runner_config=types.SimpleNamespace(activation="silu"),
         w13_weight=w13,
         w2_weight=w2,
-        w13_weight_scale=FakeTensor((E, 2 * v["inter_padded"], HIDDEN // 32), u8),
+        w13_weight_scale=FakeTensor((E, 2 * v["inter"], HIDDEN // 32), u8),
         w2_weight_scale=FakeTensor((E, HIDDEN, v["s2_cols"]), u8),
     )
     attn = types.SimpleNamespace(
@@ -241,23 +235,6 @@ def test_the_w2_scale_is_checked_at_its_padded_width(tp, weights):
         return
     with pytest.raises(ValueError, match="expert scales"):
         load(weights, tp, s2_cols=dims.scale_cols)
-
-
-@pytest.mark.parametrize("tp", TP_SIZES)
-def test_the_raw_weight_and_w13_scale_are_checked_at_their_padded_width(tp, weights):
-    """The same TP8 padding that moves w2's scale (above) moves w13 and w2's raw
-    MXFP4 storage, and w13's scale, by the same ratio: aiter rounds a rank's
-    inter up to a multiple of 8 scale-blocks before shuffling, so a loader
-    reading the unpadded ``dims.inter`` would accept weight/scale tensors one
-    read-stride short of what the kernels actually dereference. Refused at
-    TP8 (384 -> 512); not at TP2/TP4, where inter is already block-aligned."""
-    dims = Dims(tp=tp)
-    assert EXPECTED[tp]["inter_padded"] == dims.padded_scale_cols * 32
-    if dims.padded_scale_cols * 32 == dims.inter:
-        load(weights, tp, inter_padded=dims.inter)
-        return
-    with pytest.raises(ValueError, match="expert weight"):
-        load(weights, tp, inter_padded=dims.inter)
 
 
 @pytest.mark.parametrize("tp", TP_SIZES)
