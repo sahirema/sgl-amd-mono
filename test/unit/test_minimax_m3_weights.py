@@ -191,6 +191,26 @@ def load(weights, tp, **tweak):
     return layer, weights.SparseMoeLayer.from_layer(layer, 7, heads, {})
 
 
+def build_fp8_layer(tp, torch, **tweak):
+    """``build_layer``'s layer, but with the fused qkv / o_proj weight already a
+    Quark FP8 export (its own per-channel scale alongside), as an AttnFP8-style
+    checkpoint has -- not the public bf16 export ``build_layer`` otherwise models."""
+    layer = build_layer(tp, torch, **tweak)
+    fp8, f32 = torch.float8_e4m3fn, torch.float32
+    attn = layer.self_attn
+    qkv_rows = attn._fused_qkv_index.weight.shape[0]
+    attn._fused_qkv_index = types.SimpleNamespace(
+        weight=FakeTensor((qkv_rows, HIDDEN), fp8),
+        weight_scale=FakeTensor((qkv_rows,), f32),
+    )
+    o_k = attn.o_proj.weight.shape[1]
+    attn.o_proj = types.SimpleNamespace(
+        weight=FakeTensor((HIDDEN, o_k), fp8),
+        weight_scale=FakeTensor((HIDDEN,), f32),
+    )
+    return layer
+
+
 # ---------------------------------------------------------------------- tests
 @pytest.mark.parametrize("tp", TP_SIZES)
 def test_a_matching_layer_is_accepted(tp, weights):
@@ -205,6 +225,49 @@ def test_a_matching_layer_is_accepted(tp, weights):
     )  # fmt: skip
     assert got.g_in is layer.input_layernorm.weight
     assert got.g_post is layer.post_attention_layernorm.weight
+
+
+@pytest.mark.parametrize("tp", TP_SIZES)
+def test_a_matching_fp8_layer_is_accepted(tp, weights):
+    """A Quark checkpoint that already quantizes qkv / o_proj to FP8 (e.g. an
+    AttnFP8 variant) is read and reshuffled as-is: its own scale is used
+    directly rather than requantized from an assumed bf16 source."""
+    torch = sys.modules["torch"]
+    layer = build_fp8_layer(tp, torch)
+    heads = Dims(tp=tp).index_heads
+    got = weights.SparseMoeLayer.from_layer(layer, 7, heads, {})
+    assert got.s_qkv is layer.self_attn._fused_qkv_index.weight_scale.data
+    assert got.s_o is layer.self_attn.o_proj.weight_scale.data
+
+
+@pytest.mark.parametrize("tp", TP_SIZES)
+def test_fp8_without_a_scale_is_refused(tp, weights):
+    """An FP8 weight with no weight_scale at all is refused rather than read as
+    though it were bf16 or silently skipped."""
+    torch = sys.modules["torch"]
+    layer = build_layer(tp, torch)
+    qkv_rows = layer.self_attn._fused_qkv_index.weight.shape[0]
+    layer.self_attn._fused_qkv_index = types.SimpleNamespace(
+        weight=FakeTensor((qkv_rows, HIDDEN), torch.float8_e4m3fn)
+    )
+    heads = Dims(tp=tp).index_heads
+    with pytest.raises(ValueError, match="weight_scale"):
+        weights.SparseMoeLayer.from_layer(layer, 7, heads, {})
+
+
+@pytest.mark.parametrize("tp", TP_SIZES)
+def test_fp8_scale_shape_is_checked(tp, weights):
+    """The checkpoint's own scale must be one fp32 value per output row, or the
+    loader refuses rather than reading a misaligned scale."""
+    torch = sys.modules["torch"]
+    layer = build_fp8_layer(tp, torch)
+    rows = layer.self_attn._fused_qkv_index.weight.shape[0]
+    layer.self_attn._fused_qkv_index.weight_scale = FakeTensor(
+        (rows + 1,), torch.float32
+    )
+    heads = Dims(tp=tp).index_heads
+    with pytest.raises(ValueError, match="scale"):
+        weights.SparseMoeLayer.from_layer(layer, 7, heads, {})
 
 
 @pytest.mark.parametrize("tp", TP_SIZES)

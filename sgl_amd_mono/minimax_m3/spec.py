@@ -540,12 +540,13 @@ SPEC = MonoSpec(
         }
     ),
     requires=Requirements(
-        # The attention weights the kernels quantize to private FP8 copies are
-        # read as bf16 (``weights.py:68-71``), which refuses anything else --
-        # but from inside ``build``, as a bare ValueError after the model has
-        # loaded. Declaring it here moves that refusal to startup validation,
-        # where the framework collects every rank's reasons and reports them
-        # together.
+        # The server's resolved compute dtype (``model_config.dtype``), not a
+        # per-tensor check -- a Quark checkpoint that selectively quantizes some
+        # layers to FP8 still resolves this to "bfloat16". It does not stand in
+        # for weights.py's own per-tensor dtype dispatch (bf16, requantized
+        # fresh, or an already-FP8 Quark export, reused as-is): that refusal is
+        # necessarily a bare ValueError from inside ``build``, since which
+        # dtype a given Linear carries is only known once the model is loaded.
         dtypes=frozenset({"bfloat16"}),
         attention_backends=frozenset({"aiter"}),
         server_args={

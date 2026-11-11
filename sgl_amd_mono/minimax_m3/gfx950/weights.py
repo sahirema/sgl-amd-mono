@@ -10,11 +10,13 @@ which is how SGLang reports every rank's reasons together.
 
 Two kinds of tensor are private copies rather than views of the original path:
 
-- The qkv / index projection and o_proj. The public Quark MiniMax-M3 export
-  leaves them in bf16, while K1 / K4's GEMVs are
+- The qkv / index projection and o_proj. K1 / K4's GEMVs are
   per-token-activation x per-channel-weight FP8 on aiter's (16, 16) preshuffled
-  layout. A separate copy is quantized once per channel (amax / 448), keeping
-  the original module-path weights unchanged.
+  layout. The public Quark MiniMax-M3 export leaves these in bf16, in which case
+  a private copy is quantized once per channel (amax / 448); a Quark export that
+  already quantizes them per channel to FP8 (e.g. an AttnFP8 variant) is instead
+  read and reshuffled as-is -- its own scale is used directly, never requantized.
+  Either way the original module-path weights are left unchanged.
 - The router gate, kept as bf16 (K4's GEMV is bf16; SGLang holds it in fp32).
 
 The MXFP4 expert tensors, the norms, the rotary table and the routing bias are
@@ -75,6 +77,49 @@ def linear_to_ptpc_fp8(
     q = (deq / scale[:, None]).clamp_(-FP8_MAX, FP8_MAX).to(FP8_DTYPE)
     shuffled = shuffle_weight(q.contiguous(), layout=(16, 16))
     return shuffled.contiguous(), scale.contiguous()
+
+
+def fp8_ptpc_from_checkpoint(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    rows: int,
+    cols: int,
+    name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reshuffle a Quark checkpoint's own per-channel FP8 attention weight for
+    the mono FP8 GEMVs, without requantizing: the checkpoint's scale is used
+    as-is, on the understanding that Quark's per-channel FP8 export already
+    quantizes amax / 448 like ``linear_to_ptpc_fp8`` does for a bf16 source."""
+    from aiter.ops.shuffle import shuffle_weight
+
+    _need(
+        tuple(weight.shape) == (rows, cols) and weight.dtype == FP8_DTYPE,
+        f"{name}: weight {weight.dtype} {tuple(weight.shape)}, want fp8_e4m3 ({rows}, {cols})",
+    )
+    _need(
+        tuple(scale.shape) == (rows,) and scale.dtype == torch.float32,
+        f"{name}: scale {scale.dtype} {tuple(scale.shape)}, want fp32 [{rows}]",
+    )
+    shuffled = shuffle_weight(weight.data.contiguous(), layout=(16, 16))
+    return shuffled.contiguous(), scale.data.contiguous()
+
+
+def _project_to_ptpc_fp8(
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    rows: int,
+    cols: int,
+    name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """A bf16 M3 attention weight (quantized fresh) or an already-FP8 Quark
+    export (its own scale reused, not requantized) -- never anything else."""
+    if weight.dtype == torch.bfloat16:
+        return linear_to_ptpc_fp8(weight, rows, cols, name)
+    _need(
+        scale is not None,
+        f"{name}: {weight.dtype}, expected bf16 or an FP8 weight with its own weight_scale",
+    )
+    return fp8_ptpc_from_checkpoint(weight, scale, rows, cols, name)
 
 
 def _bf16_vec(t: torch.Tensor, n: int, name: str) -> torch.Tensor:
@@ -187,23 +232,36 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
         )
 
         # qkv | index_q | index_k: the fused projection SGLang builds after
-        # loading, else the two bf16 projections concatenated in that order.
+        # loading, else the two projections concatenated in that order. Either
+        # may already be a Quark FP8 export rather than bf16 -- see
+        # _project_to_ptpc_fp8.
         fused = attn._fused_qkv_index
         if fused is not None:
             weight = fused.weight.data
+            scale = getattr(fused, "weight_scale", None)
         else:
             qp, ip = attn.qkv_proj, attn.index_qkv_proj
             _need(
-                qp.weight.dtype == ip.weight.dtype == torch.bfloat16,
+                qp.weight.dtype == ip.weight.dtype,
                 f"layer {layer_id}: qkv ({qp.weight.dtype}) and index "
                 f"({ip.weight.dtype}) projections are quantized differently",
             )
             weight = torch.cat([qp.weight.data, ip.weight.data], dim=0)
-        w_qkv, s_qkv = linear_to_ptpc_fp8(
-            weight, heads.rows, HIDDEN, f"layer {layer_id} qkv"
+            qs, ins = getattr(qp, "weight_scale", None), getattr(ip, "weight_scale", None)
+            scale = (
+                torch.cat([qs.data, ins.data], dim=0)
+                if qs is not None and ins is not None
+                else None
+            )  # fmt: skip
+        w_qkv, s_qkv = _project_to_ptpc_fp8(
+            weight, scale, heads.rows, HIDDEN, f"layer {layer_id} qkv"
         )
-        w_o, s_o = linear_to_ptpc_fp8(
-            attn.o_proj.weight.data, HIDDEN, dims.o_k, f"layer {layer_id} o_proj"
+        w_o, s_o = _project_to_ptpc_fp8(
+            attn.o_proj.weight.data,
+            getattr(attn.o_proj, "weight_scale", None),
+            HIDDEN,
+            dims.o_k,
+            f"layer {layer_id} o_proj",
         )
 
         moe = layer.mlp
