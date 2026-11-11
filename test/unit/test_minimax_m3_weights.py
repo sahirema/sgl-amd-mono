@@ -192,21 +192,27 @@ def load(weights, tp, **tweak):
 
 
 def build_fp8_layer(tp, torch, **tweak):
-    """``build_layer``'s layer, but with the fused qkv / o_proj weight already a
-    Quark FP8 export (its own per-channel scale alongside), as an AttnFP8-style
-    checkpoint has -- not the public bf16 export ``build_layer`` otherwise models."""
+    """``build_layer``'s layer, but with the fused qkv / o_proj projection
+    already a Quark FP8 export with ``keep_plain_weight_layout`` applied, as
+    sglang sets it for an AttnFP8-style checkpoint under the AMD monokernel:
+    ``.weight`` is a decoy in the scheme's standard transformed layout (this
+    loader must not read it -- that copy is for apply_weights' own fallback
+    path), ``weight_plain`` / ``weight_scale_plain`` are the private,
+    untransformed copy this loader must read instead."""
     layer = build_layer(tp, torch, **tweak)
     fp8, f32 = torch.float8_e4m3fn, torch.float32
     attn = layer.self_attn
     qkv_rows = attn._fused_qkv_index.weight.shape[0]
     attn._fused_qkv_index = types.SimpleNamespace(
         weight=FakeTensor((qkv_rows, HIDDEN), fp8),
-        weight_scale=FakeTensor((qkv_rows,), f32),
+        weight_plain=FakeTensor((qkv_rows, HIDDEN), fp8),
+        weight_scale_plain=FakeTensor((qkv_rows,), f32),
     )
     o_k = attn.o_proj.weight.shape[1]
     attn.o_proj = types.SimpleNamespace(
         weight=FakeTensor((HIDDEN, o_k), fp8),
-        weight_scale=FakeTensor((HIDDEN,), f32),
+        weight_plain=FakeTensor((HIDDEN, o_k), fp8),
+        weight_scale_plain=FakeTensor((HIDDEN,), f32),
     )
     return layer
 
@@ -236,8 +242,8 @@ def test_a_matching_fp8_layer_is_accepted(tp, weights):
     layer = build_fp8_layer(tp, torch)
     heads = Dims(tp=tp).index_heads
     got = weights.SparseMoeLayer.from_layer(layer, 7, heads, {})
-    assert got.s_qkv is layer.self_attn._fused_qkv_index.weight_scale.data
-    assert got.s_o is layer.self_attn.o_proj.weight_scale.data
+    assert got.s_qkv is layer.self_attn._fused_qkv_index.weight_scale_plain.data
+    assert got.s_o is layer.self_attn.o_proj.weight_scale_plain.data
 
 
 @pytest.mark.parametrize("tp", TP_SIZES)
@@ -262,7 +268,7 @@ def test_fp8_scale_shape_is_checked(tp, weights):
     torch = sys.modules["torch"]
     layer = build_fp8_layer(tp, torch)
     rows = layer.self_attn._fused_qkv_index.weight.shape[0]
-    layer.self_attn._fused_qkv_index.weight_scale = FakeTensor(
+    layer.self_attn._fused_qkv_index.weight_scale_plain = FakeTensor(
         (rows + 1,), torch.float32
     )
     heads = Dims(tp=tp).index_heads

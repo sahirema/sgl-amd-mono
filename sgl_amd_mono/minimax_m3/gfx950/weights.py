@@ -104,6 +104,22 @@ def fp8_ptpc_from_checkpoint(
     return shuffled.contiguous(), scale.data.contiguous()
 
 
+def _attn_weight_and_scale(mod) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """A projection's own (weight, scale) for this loader: the quant scheme's
+    private, untransformed copy (``weight_plain`` / ``weight_scale_plain``) if
+    ``keep_plain_weight_layout`` produced one -- the module's own ``.weight``
+    is, for an FP8 Quark scheme, still in the scheme's standard (16, 16)
+    aiter-bpreshuffled + transposed layout, kept that way on purpose so the
+    standard forward (``apply_weights``/``apply_fp8_linear``) still works for
+    any step this file's kernels don't cover. Falls back to ``.weight`` /
+    ``.weight_scale`` for a bf16 projection, whose quant scheme never
+    transforms it at all."""
+    plain = getattr(mod, "weight_plain", None)
+    if plain is not None:
+        return plain.data, getattr(mod, "weight_scale_plain", None)
+    return mod.weight.data, getattr(mod, "weight_scale", None)
+
+
 def _project_to_ptpc_fp8(
     weight: torch.Tensor,
     scale: torch.Tensor | None,
@@ -237,8 +253,7 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
         # _project_to_ptpc_fp8.
         fused = attn._fused_qkv_index
         if fused is not None:
-            weight = fused.weight.data
-            scale = getattr(fused, "weight_scale", None)
+            weight, scale = _attn_weight_and_scale(fused)
         else:
             qp, ip = attn.qkv_proj, attn.index_qkv_proj
             _need(
@@ -246,22 +261,18 @@ class SparseMoeLayer(msgspec.Struct, frozen=True):
                 f"layer {layer_id}: qkv ({qp.weight.dtype}) and index "
                 f"({ip.weight.dtype}) projections are quantized differently",
             )
-            weight = torch.cat([qp.weight.data, ip.weight.data], dim=0)
-            qs, ins = getattr(qp, "weight_scale", None), getattr(ip, "weight_scale", None)
+            qw, qs = _attn_weight_and_scale(qp)
+            iw, ins = _attn_weight_and_scale(ip)
+            weight = torch.cat([qw, iw], dim=0)
             scale = (
-                torch.cat([qs.data, ins.data], dim=0)
-                if qs is not None and ins is not None
-                else None
+                torch.cat([qs, ins], dim=0) if qs is not None and ins is not None else None
             )  # fmt: skip
         w_qkv, s_qkv = _project_to_ptpc_fp8(
             weight, scale, heads.rows, HIDDEN, f"layer {layer_id} qkv"
         )
+        o_weight, o_scale = _attn_weight_and_scale(attn.o_proj)
         w_o, s_o = _project_to_ptpc_fp8(
-            attn.o_proj.weight.data,
-            getattr(attn.o_proj, "weight_scale", None),
-            HIDDEN,
-            dims.o_k,
-            f"layer {layer_id} o_proj",
+            o_weight, o_scale, HIDDEN, dims.o_k, f"layer {layer_id} o_proj"
         )
 
         moe = layer.mlp
