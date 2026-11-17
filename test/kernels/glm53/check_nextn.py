@@ -82,9 +82,10 @@ def _rel(a, b) -> float:
 
 class Draft:
     """A NextN layer of one kind at one width: its NextN runtime, the plain runtime
-    of its kind on the same layer weights and caches, and the tail."""
+    of its kind on the same layer weights and caches, and the tail. ``rows``:
+    (positions, requests) in place of ``rowset``'s."""
 
-    def __init__(self, kind, W, rowset, rank, tp, group, device, args):
+    def __init__(self, kind, W, rowset, rank, tp, group, device, args, rows=None):
         from sgl_amd_mono.glm53.gfx950.runner import (
             Glm53Build,
             Glm53HeadOp,
@@ -93,7 +94,7 @@ class Draft:
         )
 
         index = kind == "index"
-        positions, requests = rows_of(W, rowset)
+        positions, requests = rows or rows_of(W, rowset)
         live = [p for p in positions if p is not None]
         self.live = len(live)
         pages = C.Pages(max(requests) + 1, max(live) + W + 1, device)
@@ -101,7 +102,8 @@ class Draft:
         self.cos, self.sin = C.rope(max(live) + W + 1, device)
         self.st, self.topk0 = C.make_step(positions, requests, pages, device)
         self.eh, (self.w_eh, self.emb) = eh_weights(rank, tp, device)
-        w = C.layer_weights(78, rank, tp, device, kind)
+        mxfp4 = getattr(args, "mxfp4", False)
+        w = C.layer_weights(78, rank, tp, device, kind, mxfp4)
 
         def build(**kw):
             key = Glm53Build(
@@ -112,6 +114,10 @@ class Draft:
                 index_max_seq=C.MAX_SEQ if index else 0,
                 fp8_shuffled=True,
                 kv_fp8=args.kv == "fp8",
+                mxfp4=mxfp4 and not kw.get("head", False),
+                native_fp4=mxfp4
+                and not kw.get("head", False)
+                and getattr(args, "native_fp4", False),
                 **kw,
             )
             rt = Glm53Runtime(key, rank, group, device)
@@ -135,6 +141,11 @@ class Draft:
     def advance(self):
         for rt in self.runtimes:
             rt.advance_step()
+
+    def step(self):
+        """One NextN launch from the step's rows, then the next epoch."""
+        self.run_nextn()
+        self.advance()
 
     def run_nextn(self):
         self.st.topk.copy_(self.topk0)
@@ -372,7 +383,16 @@ def main() -> int:
     ap.add_argument("--only", default="tables,entry,replay")
     ap.add_argument("--replays", type=int, default=20)
     ap.add_argument("--deadline", type=float, default=10.0)
+    ap.add_argument(
+        "--positions", default="", help="comma-separated live-row positions"
+    )
+    ap.add_argument("--mxfp4", action="store_true", help="MXFP4 MLPs")
+    ap.add_argument(
+        "--native-fp4", action="store_true", help="MXFP8 x MXFP4 MFMA (with --mxfp4)"
+    )
     args = ap.parse_args()
+    if args.positions:
+        C.POSITIONS = [int(p) for p in args.positions.split(",")]
     rank, tp = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     device = torch.device("cuda", torch.cuda.current_device())

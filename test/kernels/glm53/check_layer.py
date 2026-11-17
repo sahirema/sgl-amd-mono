@@ -21,12 +21,16 @@ inputs, within the spec's bounds, and one rank's down or gate | up scales x2 fai
 them; ``--check-embed``: layer 0 from the token ids equals the dense launch fed the
 gathered embedding rows (outputs, cache rows, top-k), and a changed token id differs;
 ``--check-head``: the tail's logits against a torch and an f32 tail, within the
-spec's bounds, and the final norm x1.01 fails them.
+spec's bounds, and the final norm x1.01 fails them. ``--similar X``: the live rows of a
+request are one random row plus X times their own, so they route alike, as a verify
+step's rows do (with ``--rowsets v4``). ``--mxfp4``: the experts and the dense MLP in
+MXFP4, as SGLang holds an MXFP4 checkpoint's.
 
-``--dump DIR`` writes, per run and rank, the SHA-256 of every launch's output rows,
-of the cache rows and top-k entries it writes, and after each width of every cache
-whole (``--perturb`` negates one input value, a negative control); ``--compare A B``
-matches two dump directories and exits 1 on any difference."""
+``--dump DIR`` writes, per run and rank, the SHA-256 of every launch's output rows
+(the tail's: its gathered logits), of the cache rows and top-k entries it writes,
+and after each width of every cache whole (``--perturb`` negates one input value, a
+negative control); ``--compare A B`` matches two dump directories and exits 1 on
+any difference."""
 
 import argparse
 import hashlib
@@ -81,6 +85,22 @@ def _norm(g, n: int, device, dtype=torch.bfloat16) -> torch.Tensor:
     return (1 + 0.1 * torch.randn(n, generator=g, device=device)).to(dtype)
 
 
+def _mxfp4(g, e: int, rows: int, k: int, code: int, device):
+    """Random MXFP4 experts [e, rows, k]: E2M1 bytes (two values, the lower k in the
+    low nibble) and E8M0 codes near ``code`` a 32 values; returned raw and as SGLang
+    holds an MXFP4 MoE for AITER (``shuffle_weight`` (16, 16), ``e8m0_shuffle``)."""
+    from aiter.ops.shuffle import shuffle_weight
+    from aiter.utility.fp4_utils import e8m0_shuffle
+
+    w = torch.randint(0, 256, (e, rows, k // 2), generator=g, device=device)
+    w = w.to(torch.uint8)
+    s = code + torch.randint(-1, 2, (e, rows, k // 32), generator=g, device=device)
+    s = s.to(torch.uint8)
+    ws = shuffle_weight(w, (16, 16))
+    ss = e8m0_shuffle(s.view(e * rows, -1)).view(e, rows, -1)
+    return w, s, ws, ss
+
+
 def model_kinds(n: int) -> list:
     """The kinds of the first n MoE layers (from layer 3): SGLang runs the indexer on
     layer i unless max(i - 2, 0) % 4."""
@@ -120,12 +140,14 @@ def head_weights(rank: int, tp: int, device):
     return Glm53HeadWeights(g_norm=g_norm, w_head=w.bfloat16())
 
 
-def layer_weights(layer: int, rank: int, tp: int, device, kind: str):
+def layer_weights(layer: int, rank: int, tp: int, device, kind: str, mxfp4=False):
     """Layer ``layer``'s random tensors as this rank's shard (every rank draws the
     same): block-FP8 projections and experts read in place, W_UK / W_UV, the router
     and the indexer's weights_proj packed; the shared expert is slot 256. A dense
     layer's MLP: its intermediates as expert-shaped slices, no router read; layer 0
-    (``embed``) reads this rank's embedding rows in the router's place."""
+    (``embed``) reads this rank's embedding rows in the router's place. ``mxfp4``:
+    the experts (or the dense MLP) MXFP4 as SGLang holds an MXFP4 checkpoint's, the
+    raw tensors in ``keep[-4:]``."""
     from sgl_amd_mono.glm53.gfx950.packing import pack_bf16, pack_fp8
     from sgl_amd_mono.glm53.gfx950.runner import Glm53Weights
 
@@ -173,6 +195,23 @@ def layer_weights(layer: int, rank: int, tp: int, device, kind: str):
         s_dn = _scales(g, (dense, HIDDEN // 128, inter // 128), DENSE_INTER, device)
     if kind == "embed":
         w_r = embedding(rank, tp, device)
+    if mxfp4 and dense:
+        # SGLang's MXFP4 linears (row-major) as expert slices in AITER's layouts
+        from sgl_amd_mono.glm53.gfx950.weights import dense_mxfp4_slices
+
+        g4 = _gen(1000 * layer + 13 + rank, device)
+        di = DENSE_INTER // tp
+        gu, s_gu, _, _ = _mxfp4(g4, 1, 2 * di, HIDDEN, 119, device)
+        dn, s_dn, _, _ = _mxfp4(g4, 1, HIDDEN, di, 123, device)
+        raw = (gu[0], s_gu[0], dn[0], s_dn[0])
+        w_ug, s_ug, w_dn, s_dn, dense = dense_mxfp4_slices(*raw, inter)
+        keep = (*keep, *raw)
+    elif mxfp4:
+        # E8M0 codes that keep the outputs near unit RMS (random E2M1 has RMS ~2.9)
+        g4 = _gen(1000 * layer + 11 + rank, device)
+        raw_ug, raw_sug, w_ug, s_ug = _mxfp4(g4, E, 2 * inter, HIDDEN, 119, device)
+        raw_dn, raw_sdn, w_dn, s_dn = _mxfp4(g4, E, HIDDEN, inter, 121, device)
+        keep = (*keep, raw_ug, raw_sug, raw_dn, raw_sdn)
     return Glm53Weights(
         g_in=_norm(g, HIDDEN, device),
         g_q=_norm(g, Q_LORA, device),
@@ -202,6 +241,7 @@ def layer_weights(layer: int, rank: int, tp: int, device, kind: str):
         index=table,
         keep=keep,
         dense=dense,
+        mxfp4=mxfp4,
     )
 
 
@@ -318,6 +358,7 @@ class Model:
         stop=False,
         head=False,
         first=None,
+        similar=0.0,
     ):
         from sgl_amd_mono.glm53.gfx950.runner import (
             Glm53Build,
@@ -337,8 +378,10 @@ class Model:
         ]
         self.cos, self.sin = rope(max(live) + W + 1, device)
         self.step_tables, self.topk0 = make_step(positions, requests, pages, device)
+        mxfp4 = getattr(args, "mxfp4", False)
         self.weights = [
-            layer_weights(first + i, rank, tp, device, k) for i, k in enumerate(kinds)
+            layer_weights(first + i, rank, tp, device, k, mxfp4)
+            for i, k in enumerate(kinds)
         ]
         vocab_rows = VOCAB // tp
         self.runtimes = {}
@@ -356,6 +399,12 @@ class Model:
                 dense=w.dense,
                 tokens=kind == "embed",
                 vocab_rows=vocab_rows if kind == "embed" else 0,
+                mxfp4=mxfp4,
+                # the MXFP8-rows form (GLM-5.2's): the MoE layers only, the dense
+                # slices stay on the MXFP4 rows the generator builds
+                native_fp4=w.mxfp4
+                and not w.dense
+                and getattr(args, "native_fp4", False),
             )
             self.runtimes[kind] = Glm53Runtime(key, rank, group, device)
             self.runtimes[kind].set_deadline(args.deadline)
@@ -380,7 +429,14 @@ class Model:
             rt.set_deadline(args.deadline)
             self.head = Glm53HeadOp(rt, head_weights(rank, tp, device))
         g = _gen(3, device)
-        self.h = torch.randn(W, HIDDEN, generator=g, device=device).bfloat16()
+        h = torch.randn(W, HIDDEN, generator=g, device=device)
+        if similar:
+            base = h.clone()
+            noise = similar * torch.randn(W, HIDDEN, generator=g, device=device)
+            for s, (p, r) in enumerate(zip(positions, requests)):
+                if p is not None:
+                    h[s] = base[r] + noise[s]
+        self.h = h.bfloat16()
         if kinds[:1] == ["embed"]:
             self.h = token_ids(positions, device)
 
@@ -738,6 +794,10 @@ def dump(model: Model, name: str, steps: int, perturb: bool, out: dict) -> str:
             out[f"{name}/s{step}/l{i}"] = d
 
         h = model.step(after=after)
+        if model.head is not None:
+            out[f"{name}/s{step}/tail"] = {
+                f"out.r{s}": _digest(h[s]) for s in range(h.shape[0])
+            }
         torch.cuda.synchronize()
     whole = {f"kv.l{i}": _digest(c.kv) for i, c in enumerate(model.caches)}
     whole.update(
@@ -800,10 +860,24 @@ def main() -> int:
     ap.add_argument("--check-head", action="store_true")
     ap.add_argument("--dump", default="", help="write the digests into DIR")
     ap.add_argument("--perturb", action="store_true", help="negate one input value")
+    ap.add_argument("--similar", type=float, default=0.0, help="rows routing alike")
+    ap.add_argument("--mxfp4", action="store_true", help="MXFP4 MLPs")
     ap.add_argument("--compare", nargs=2, metavar=("A_DIR", "B_DIR"))
+    ap.add_argument(
+        "--positions", default="", help="comma-separated live-row positions"
+    )
+    ap.add_argument("--mxfp4", action="store_true", help="MXFP4 (A4W4) MoE experts")
+    ap.add_argument(
+        "--native-fp4", action="store_true", help="MXFP8 x MXFP4 MFMA (with --mxfp4)"
+    )
     args = ap.parse_args()
+    if args.mxfp4 and args.check_dense:
+        ap.error("--check-dense checks the FP8 dense MLP (MXFP4: check_mxfp4.py)")
     if args.compare:
         return compare(*args.compare)
+    if args.positions:
+        global POSITIONS
+        POSITIONS = [int(p) for p in args.positions.split(",")]
     rank, tp = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     device = torch.device("cuda", torch.cuda.current_device())
@@ -817,7 +891,16 @@ def main() -> int:
     ]:
         positions, requests = rows_of(W, rowset)
         model = Model(
-            kinds, positions, requests, rank, tp, group, device, args, head=head
+            kinds,
+            positions,
+            requests,
+            rank,
+            tp,
+            group,
+            device,
+            args,
+            head=head,
+            similar=args.similar,
         )
         name = f"{args.kv}-{args.kind}/w{W}{rowset}"
         if args.dump:

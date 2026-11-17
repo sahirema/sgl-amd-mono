@@ -10,6 +10,7 @@ entry point in ``pyproject.toml``), which registers each spec.
 """
 
 import inspect
+import os
 
 __version__ = "0.1.0.dev0"
 
@@ -33,6 +34,13 @@ SPECS = {
         "MiniMaxM3SparseForConditionalGeneration",
         None,
     ): "sgl_amd_mono.minimax.spec:SPEC",
+    ("Qwen3_5MoeForCausalLM", None): "sgl_amd_mono.qwen38_a95b_mxfp4.spec:SPEC",
+    ("KimiK3ForConditionalGeneration", None): "sgl_amd_mono.kimi_k3.spec:SPEC",
+    ("KimiK31ForConditionalGeneration", None): "sgl_amd_mono.kimi_k31.spec:SPEC",
+    (
+        "Qwen3_5MoeForConditionalGeneration",
+        None,
+    ): "sgl_amd_mono.qwen35_a17b.spec:SPEC",
     # the MTP draft routes its own steps (qwen38_flash_next/draft.py)
     ("Qwen4ExpForCausalLMMTP", None): "sgl_amd_mono.qwen38_flash_next.draft:SPEC",
     (
@@ -82,3 +90,11 @@ def register_specs() -> None:
         if takes_model_type:
             kwargs["model_type"] = model_type
         register(**kwargs)
+
+    # SGLANG_AMD_MONO_ROCM_LLVM=<llvm prefix, e.g. /opt/rocm/llvm>: compile this
+    # package's kernels with that LLVM instead of FlyDSL's bundled one (common/rocm_codegen.py)
+    llvm_dir = os.environ.get("SGLANG_AMD_MONO_ROCM_LLVM")
+    if llvm_dir:
+        from sgl_amd_mono.common import rocm_codegen
+
+        rocm_codegen.install(llvm_dir)
