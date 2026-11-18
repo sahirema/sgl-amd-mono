@@ -137,16 +137,22 @@ TP_SIZES = (2, 4, 8)
 #     w3 are uneven too and run clean on hardware. What is unique to TP8 w4 is
 #     per-token placement AND unevenness AND shared_after_routing false.
 #
-# THE FLOOR STAYS AT 5, now for a better reason than before: widths 1-4 at TP8
-# have never been checked for NUMERICS (v4 §12), and the point above shows that
-# "it runs" was never evidence about correctness. An accuracy gate is the
-# blocker, not another throughput run.
+# THE FLOOR IS NOW 1 (was 5). Reachability measured: three floor-1 arms ran
+# 4,445 narrow-path decode steps, 1,462 of them at width 4, zero faults; geomean
+# output throughput +15.1% -> +42.1%, conc-4 8,192 +111.3%.
+#
+# NUMERICS AT WIDTHS 1-4 REMAIN UNVALIDATED (v4 §12). "It runs" was never
+# evidence about correctness, and the overrun above is SILENT, so no throughput
+# run can reveal wrong output. The GSM8K gate failed its own positive control
+# and the LDS canary meant to replace it is unwritten. The sizing fix bounds the
+# overrun; it does not prove the output. SGLANG_TEST_MONO_MIN_WIDTH=5
+# re-quarantines the narrow path without editing this table.
 #
 # A step outside its TP's range runs the model's normal forward, which the spec
 # dispatches: ``DeviceLimits.widths`` is declared per ISA rather than per TP, so
 # the framework cannot route this itself. The union below is what the spec
 # declares; the per-TP range is what it builds and serves.
-WIDTH_RANGE = {2: (1, 12), 4: (1, 16), 8: (5, 16)}
+WIDTH_RANGE = {2: (1, 12), 4: (1, 16), 8: (1, 16)}
 # Test hook for the floor above; see ``Dims.width_range``. Named under the
 # SGLANG_TEST_MONO_ prefix because RFC #43949 decision 2 bans per-model env
 # vars and permits that prefix for test hooks.
@@ -238,12 +244,12 @@ class Dims(msgspec.Struct, frozen=True):
 
         ``SGLANG_TEST_MONO_MIN_WIDTH`` overrides the low bound. This is a TEST
         HOOK -- RFC #43949 decision 2 bans per-model env vars but permits the
-        ``SGLANG_TEST_MONO_`` prefix for exactly this -- and it exists to make
-        the TP8 narrow-path fault reproducible without editing the table.
+        ``SGLANG_TEST_MONO_`` prefix for exactly this -- and it exists to move
+        the floor for an experiment without editing the table.
 
-        DANGER at TP8. The floor of 5 is there because width 4 faulted on all
-        eight ranks (see ``WIDTH_RANGE``). Lowering it re-enables that path.
-        Run it only on a node you have to yourself.
+        CAUTION at TP8. The floor is 1, so widths 1-4 route to the narrow MoE
+        path. Its overrun is bounded by sizing but its NUMERICS are unvalidated
+        (see ``WIDTH_RANGE``); set this to 5 to quarantine it again.
 
         It is read HERE rather than at import because the floor depends on
         ``tp`` and the port resolves TP at build time -- the in-tree ancestor

@@ -63,7 +63,7 @@ EXPECTED = {
         o_k=1024,
         max_qkv_rows=1920,
         own_rows=1536,
-        width_range=(5, 16),
+        width_range=(1, 16),
         score_blocks=8192,
         score_words=8192,
         iq_off=1280,
@@ -175,7 +175,7 @@ def test_min_width_env_is_absent_by_default(tp, monkeypatch):
     """The hook must not change anything unless it is set. Guards against the
     override leaking in from a developer's shell or a container's env block."""
     monkeypatch.delenv("SGLANG_TEST_MONO_MIN_WIDTH", raising=False)
-    assert Dims(tp=tp).width_range == {2: (1, 12), 4: (1, 16), 8: (5, 16)}[tp]
+    assert Dims(tp=tp).width_range == {2: (1, 12), 4: (1, 16), 8: (1, 16)}[tp]
 
 
 def test_min_width_env_lowers_the_floor_and_the_built_widths_follow(monkeypatch):

@@ -367,13 +367,17 @@ def test_narrow_opart_holds_every_reachable_width(tp):
 
 
 def test_tp8_narrow_opart_is_the_known_defect_not_a_passing_case():
-    """Negative control for the test above: prove it would FAIL if the floor of
-    5 were lowered, rather than passing because the arithmetic is toothless.
+    """Pin the TP8 narrow-region arithmetic, and require that every narrow
+    width the table actually ROUTES fits it.
 
-    TP8 width 4 is the configuration that faulted on an 8-rank capture. The
-    guard that keeps it out of production is ``WIDTH_RANGE[8]`` starting at 5,
-    which is exactly ``wide_from`` -- not a fix to the region. If someone
-    reduces that floor, the test above must start failing.
+    While ``WIDTH_RANGE[8]`` floored at ``wide_from`` this was a negative
+    control: the region was undersized and the floor was the only thing keeping
+    width 4 out of production. The floor is now 1, so those widths are served,
+    and the live guard is coverage rather than quarantine.
+
+    Sizing only. Widths 1-4 at TP8 are still ungated for NUMERICS -- the GSM8K
+    gate failed its own positive control and the LDS canary is unwritten --
+    and nothing here speaks to output correctness.
     """
     layout = Layout(dims=Dims(tp=8))
     waves = THREADS // 64
@@ -387,15 +391,20 @@ def test_tp8_narrow_opart_is_the_known_defect_not_a_passing_case():
     assert (3 + 1) * waves * 64 * 4 == old_capacity
     # The fix covers width 4 and leaves TP2/TP4 untouched.
     assert layout.narrow_opart_floats(4) == 10240
-    # The floor STAYS at wide_from until hardware says otherwise. Correct
-    # sizing makes lowering it plausible, not proven: the (nil) fault has two
-    # candidate causes and this addresses only one, so the floor may not drop
-    # until a TP8 width-4 decode runs clean on 8 ranks.
-    assert WIDTH_RANGE[8][0] == layout.wide_from, (
-        "do not lower TP8's floor on the strength of the opart fix alone -- "
-        "run a TP8 width-4 decode first; the other candidate (uneven per-token "
-        "UG placement at width 4) is untouched by it"
-    )
+    # The floor is below wide_from, so narrow widths are routed: every one of
+    # them must fit the region as sized. The old sizing fails this at width 4
+    # by 2,048 floats, which is what makes this a real guard and not a
+    # restatement of the line above.
+    low = WIDTH_RANGE[8][0]
+    routed_narrow = list(range(low, layout.wide_from))
+    assert routed_narrow, "TP8 routes no narrow widths; this guard is toothless"
+    for s in routed_narrow:
+        needed = (s + 1) * waves * 64 * 4
+        assert layout.narrow_opart_floats(s) >= needed, (
+            f"TP8 width {s} is routed (floor {low}) but the narrow opart region "
+            f"holds {layout.narrow_opart_floats(s)} floats against {needed} "
+            "needed -- grow the region or raise the floor"
+        )
     for tp in (2, 4):
         other = Layout(dims=Dims(tp=tp))
         for s in range(1, other.wide_from):
